@@ -1,13 +1,11 @@
 import os
 from pinecone import Pinecone, ServerlessSpec
 from src.chat_model import get_embeddings
-from src.constants import INDEX_NAME_CACHE_MEMORY
 # Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
-INDEX_NAME = INDEX_NAME_CACHE_MEMORY
 
-def create_pincone_database(index_name=INDEX_NAME):
+def create_pincone_database(index_name:str):
     """
     Create a Pinecone database if it doesn't exist and connect to it.
 
