@@ -12,6 +12,94 @@ from src.state import *
 
 llm = get_llm()
 
+
+# 01. Define the output structure using Pydantic[cite: 1, 4]
+# ========================================================
+# OptimizedQuery Decision
+# ========================================================
+query_optimizer_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are a query optimization module for a RAG retrieval system.
+Your task is to optimize the user's question for document retrieval.
+
+Goals:
+1. Remove unnecessary conversational words.
+2. Preserve the original meaning exactly.
+3. Extract important keywords.
+4. Extract important named entities.
+5. Create a concise retrieval-friendly query.
+
+Rules:
+- Do NOT answer the question.
+- Do NOT add information that is not present in the question.
+""",
+        ),
+        (
+            "human",
+            "Question:\n{question}",
+        ),
+    ]
+)
+
+optimizer_llm = llm.with_structured_output(OptimizedQueryOutput)
+
+
+
+def optimizer_retrieval_node(state: State) -> State:
+    """
+    Optimize the user question for retrieval.
+
+    Args:
+        state (State): Current LangGraph state.
+
+    Returns:
+        State: Updated state containing optimized query,
+        keywords, and entities.
+    """
+    try:
+        question = state.get("question", "").strip()
+
+        if not question:
+            return {
+                "optimized_query": "",
+                "keywords": [],
+                "entities": []
+            }
+
+        result: OptimizedQueryOutput = optimizer_llm.invoke(
+            query_optimizer_prompt.format_messages(
+                question=question
+            )
+        )
+
+        optimized_query = result.optimized_query.strip()
+
+        if not optimized_query:
+            optimized_query = question
+
+        logging.info("\n========== QUERY OPTIMIZER ==========")
+        logging.info("Original:", question)
+        logging.info("Optimized:", optimized_query)
+        logging.info("Keywords:", result.keywords)
+        logging.info("Entities:", result.entities)
+
+        return {
+            "optimized_query": optimized_query,
+            "keywords": result.keywords,
+            "entities": result.entities
+        }
+
+    except Exception as e:
+        logging.info(f"Query optimization failed: {e}")
+
+        return {
+            "optimized_query": state.get("question", ""),
+            "keywords": [],
+            "entities": []
+        }
+
 # -----------------------------
 # 1) Decide retrieval
 # -----------------------------
@@ -527,11 +615,11 @@ def is_use(state: State) -> State:
     logging.info("Question:", question)
     logging.info("Answer:", answer)
     logging.info("IsUSE:", decision.isuse)
-    logging.info("Reason:", decision.reason)
+    logging.info("Reason:", decision.use_reason)
 
     return {
         "isuse": decision.isuse,
-        "use_reason": decision.reason,
+        "use_reason": decision.use_reason,
     }
 
 # -----------------------------
@@ -596,7 +684,7 @@ MAX_REWRITE_TRIES = 3
 def route_after_isuse(state: State,) -> Literal["evaluate_answer","rewrite_question","no_answer_found",]:
 
     isuse = state.get("isuse")
-    rewrite_tries = state.get("rewrite_tries", 0)
+    rewrite_tries = state.get("rewrite_tries", MAX_REWRITE_TRIES)
 
     logging.info("\n========== ROUTE AFTER ISUSE ==========")
     logging.info("IsUSE:", isuse)
