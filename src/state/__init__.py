@@ -19,8 +19,65 @@ USEFULNESS_STATUS = Literal[
 ]
 
 # --------------------------
-# Evaluation Result
+# Evaluation
 # --------------------------
+
+class EvaluationOutput(BaseModel):
+    hallucination_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Hallucination score. 0 means no hallucination, 1 means severe hallucination."
+    )
+
+    hallucinated_claims: List[str] = Field(
+        default_factory=list
+    )
+
+    supported_claims: List[str] = Field(
+        default_factory=list
+    )
+
+    groundedness_score: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    evidence_alignment: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    completeness: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    accuracy: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    relevance: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    sycophancy_detected: bool
+
+    sycophancy_score: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+    user_assumptions: List[str] = Field(
+        default_factory=list
+    )
+
+    contradictions: List[str] = Field(
+        default_factory=list
+    )
+
+    reasoning: str
 
 class EvaluationResult(TypedDict):
     """
@@ -34,6 +91,7 @@ class EvaluationResult(TypedDict):
     overall_quality: float | None
     is_reliable: bool
     evaluation_status: Literal["success", "failed"]
+
 
 # ============================================================
 # Graph State
@@ -49,6 +107,13 @@ class State(TypedDict):
 
     original_question: str
     question: str
+
+    # ========================================================
+    # OptimizedQuery Decision
+    # ========================================================
+    optimized_query :str
+    keywords: List[str]
+    entities: List[str]
 
     # ========================================================
     # Retrieval Decision
@@ -114,6 +179,16 @@ class State(TypedDict):
     cache_hit: bool
     cache_similarity: float
 
+
+
+# 01. Define the output structure using Pydantic[cite: 1, 4]
+# ========================================================
+# OptimizedQuery Decision
+# ========================================================
+class OptimizedQueryOutput(BaseModel):
+    optimized_query: str = Field(description="Concise retrieval-friendly query")
+    keywords: List[str] = Field(description="Important retrieval keywords")
+    entities: List[str] = Field(description="Entities explicitly mentioned in the question")
 
 
 # ============================================================
