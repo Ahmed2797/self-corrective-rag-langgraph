@@ -1,7 +1,10 @@
 from langgraph.graph import StateGraph, START, END
 from src.state import State
+from src.constants import SIMILARITY_THRESHOLD
 from src.retrive.retrieval_pipeline import (
+    optimizer_retrieval_node,
     check_semantic_cache_node,
+    check_retrieval_score,
     decide_retrieval,
     generate_direct,
     is_relevant,
@@ -22,17 +25,16 @@ from src.retrive.retrieval_pipeline import (
 from src.exception import CustomException
 from src.logger import logging
 
-
-def retrieve(state: State, retriever):
+def retrieve(state: State, retriever) -> State:
     """
-    Retrieve documents using the configured retriever.
+    Retrieve documents using similarity search and store their scores.
 
     Args:
         state (State): Current LangGraph state.
-        retriever: Configured FAISS or Pinecone retriever.
+        retriever: Configured FAISS or Pinecone vector store.
 
     Returns:
-        dict: Retrieved documents.
+        State: Updated state containing retrieved documents and similarity scores.
 
     Raises:
         CustomException: If document retrieval fails.
@@ -40,18 +42,37 @@ def retrieve(state: State, retriever):
     try:
         logging.info("Starting document retrieval.")
 
-        q = state.get("retrieval_query") or state["question"]
+        query = state.get("retrieval_query") or state["question"]
 
-        logging.info(f"Retrieval query: {q}")
+        logging.info(f"Retrieval query: {query}")
 
-        docs = retriever.invoke(q)
+        docs_with_scores = retriever.similarity_search_with_score(
+            query,
+            k=5
+        )
 
-        logging.info(f"Retrieved {len(docs)} documents.")
+        docs = []
+        retrieval_scores = []
 
-        return {"docs": docs}
+        for doc, score in docs_with_scores:
+            # if score <= SIMILARITY_THRESHOLD:
+            docs.append(doc)
+            retrieval_scores.append(float(score))
+
+        logging.info(
+            f"Retrieved {len(docs)} documents, "
+            f"{len(retrieval_scores)} passed similarity threshold."
+        )
+
+        return {
+            "docs": docs,
+            "retrieval_scores": retrieval_scores,
+        }
 
     except Exception as e:
-        logging.error(f"Error during document retrieval: {str(e)}")
+        logging.error(
+            f"Error during document retrieval: {str(e)}"
+        )
         raise CustomException(e)
 
 
@@ -76,10 +97,13 @@ def create_graph(retriever):
         logging.info("Adding LangGraph nodes.")
 
         g.add_node("check_semantic_cache", check_semantic_cache_node)
+        g.add_node("optimized_query_init", optimizer_retrieval_node)
+
         g.add_node("decide_retrieval", decide_retrieval)
         g.add_node("generate_direct", generate_direct)
         g.add_node("retrieve", lambda state: retrieve(state, retriever))
-        g.add_node("is_relevant", is_relevant)
+        # g.add_node("is_relevant", is_relevant)
+        g.add_node("check_retrieval_score", check_retrieval_score)
         g.add_node("generate_from_context", generate_from_context)
         g.add_node("no_answer_found", no_answer_found)
         g.add_node("is_sup", is_sup)
@@ -100,19 +124,22 @@ def create_graph(retriever):
             route_after_cache,
             {"cached_answer": END, "continue_rag": "decide_retrieval"},
         )
+        g.add_edge("decide_retrieval", "optimized_query_init")
 
         g.add_conditional_edges(
-            "decide_retrieval",
+            "optimized_query_init",
             route_after_decide,
             {"generate_direct": "generate_direct", "retrieve": "retrieve"},
         )
 
         g.add_edge("generate_direct", END)
 
-        g.add_edge("retrieve", "is_relevant")
+        # g.add_edge("retrieve", "is_relevant")
+        g.add_edge("retrieve", "check_retrieval_score")
 
         g.add_conditional_edges(
-            "is_relevant",
+            "check_retrieval_score",
+            # "is_relevant",
             route_after_relevance,
             {"generate_from_context": "generate_from_context", "no_answer_found": "no_answer_found"},
         )
