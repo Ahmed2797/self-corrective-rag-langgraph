@@ -128,6 +128,7 @@ class State(TypedDict):
 
     docs: List[Document]
     relevant_docs: List[Document]
+    retrieval_scores: list
 
     # ========================================================
     # Generated Answer
