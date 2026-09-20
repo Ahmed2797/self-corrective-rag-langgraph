@@ -37,6 +37,11 @@ def run_rag(question: str):
     with get_openai_callback() as callback:
 
         final_state = app.invoke(initial_state)
+        
+        print("Prompt tokens:", callback.prompt_tokens)
+        print("Completion tokens:", callback.completion_tokens)
+        print("Total tokens:", callback.total_tokens)
+        print("Total cost:", callback.total_cost)
 
         latency_ms = round(
             (time.perf_counter() - start_time) * 1000,
