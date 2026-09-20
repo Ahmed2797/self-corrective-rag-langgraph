@@ -3,7 +3,7 @@ import uuid
 from langchain_core.prompts import ChatPromptTemplate
 from src.evalution.evaluation_engine import evaluate_answer
 from src.vector import create_embedding, create_pincone_database
-from src.constants import CACHE_THRESHOLD, CACHE_VERSION, INDEX_NAME_CACHE_MEMORY
+from src.constants import CACHE_THRESHOLD, CACHE_VERSION, INDEX_NAME_CACHE_MEMORY,SIMILARITY_THRESHOLD_FIASS,SIMILARITY_THRESHOLD_PINECONE
 from src.exception import CustomException
 from src.logger import logging
 
@@ -331,10 +331,47 @@ def no_answer_found(state: State):
     return {"answer": "No answer found.", "context": ""}
 
 
+def check_retrieval_score(state: State) -> State:
+    """
+    Determine whether retrieved documents are sufficiently similar
+    to the query based on their retrieval scores.
+
+    Args:
+        state (State): Current LangGraph state.
+
+    Returns:
+        State: Updated state containing relevant documents.
+    """
+    try:
+        docs = state.get("docs", [])
+        scores = state.get("retrieval_scores", [])
+
+        relevant_docs = []
+
+        for doc, score in zip(docs, scores):
+            if score <= SIMILARITY_THRESHOLD_FIASS: ## FIASS
+                relevant_docs.append(doc)
+            # if score >= SIMILARITY_THRESHOLD_PINECONE: ## Pincone
+            #     relevant_docs.append(doc)
+
+        logging.info(
+            f"Relevant documents: {len(relevant_docs)}/{len(docs)}"
+        )
+
+        return {
+            "relevant_docs": relevant_docs
+        }
+
+    except Exception as e:
+        logging.error(f"Retrieval score check failed: {str(e)}")
+        raise CustomException(e)
+
+
 def route_after_relevance(state: State) -> Literal["generate_from_context", "no_answer_found"]:
     if state.get("relevant_docs") and len(state["relevant_docs"]) > 0:
         return "generate_from_context"
     return "no_answer_found"
+    # return "query_optimizer"
 
 
 # -----------------------------
@@ -799,6 +836,7 @@ def search_semantic_cache(question: str):
             top_k=1,
             include_metadata=True,
         )
+        logging.info("Semantic cache matching records.",result)
 
         if not result.matches:
             logging.info("Semantic cache miss: no matching records.")
