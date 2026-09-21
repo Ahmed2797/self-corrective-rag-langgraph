@@ -272,8 +272,8 @@ def generate_direct(state: State):
         logging.error(f"Error in generate_direct: {str(e)}")
         raise CustomException(e)
 
-def route_after_decide(state: State) -> Literal["generate_direct", "retrieve"]:
-    return "retrieve" if state["need_retrieval"] else "generate_direct"
+def route_after_decide(state: State) -> Literal["generate_with_tools", "retrieve"]:
+    return "retrieve" if state["need_retrieval"] else "generate_with_tools"
 
 
 # -----------------------------
@@ -914,7 +914,7 @@ def search_semantic_cache(question: str):
             top_k=1,
             include_metadata=True,
         )
-        logging.info("Semantic cache matching records.",result)
+        logging.info(f"Semantic cache matching records: {result}")
 
         if not result.matches:
             logging.info("Semantic cache miss: no matching records.")
