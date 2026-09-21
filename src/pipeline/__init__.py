@@ -4,6 +4,10 @@ from src.graph import create_graph
 from src.exception import CustomException
 from src.logger import logging
 
+from langgraph.checkpoint.sqlite import SqliteSaver
+# MemorySaver with:
+memory = SqliteSaver.from_conn_string("file:///path/to/db.sqlite")
+
 
 def pipeline():
     """
@@ -32,6 +36,7 @@ def pipeline():
 
         logging.info("Creating LangGraph application.")
         app = create_graph(retriever=retriever)
+        # app = create_graph(retriever=retriever,checkpointer=memory)
 
         logging.info("LangGraph application created successfully.")
 
