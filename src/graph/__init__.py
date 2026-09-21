@@ -5,7 +5,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.state import State
 from src.logger import logging
 from src.exception import CustomException
-from src.constants import SIMILARITY_THRESHOLD
 from src.retrive.retrieval_pipeline import (
     optimizer_retrieval_node,
     check_semantic_cache_node,
