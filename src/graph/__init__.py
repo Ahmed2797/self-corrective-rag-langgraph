@@ -1,13 +1,19 @@
+from typing import Optional
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import MemorySaver
 from src.state import State
+from src.logger import logging
+from src.exception import CustomException
 from src.constants import SIMILARITY_THRESHOLD
 from src.retrive.retrieval_pipeline import (
     optimizer_retrieval_node,
     check_semantic_cache_node,
     check_retrieval_score,
     decide_retrieval,
-    generate_direct,
-    is_relevant,
+    # generate_direct,
+    generate_with_tools,
+    # is_relevant,
     generate_from_context,
     no_answer_found,
     is_sup,
@@ -22,8 +28,7 @@ from src.retrive.retrieval_pipeline import (
     route_after_issup,
     route_after_isuse,
 )
-from src.exception import CustomException
-from src.logger import logging
+
 
 def retrieve(state: State, retriever) -> State:
     """
@@ -76,15 +81,17 @@ def retrieve(state: State, retriever) -> State:
         raise CustomException(e)
 
 
-def create_graph(retriever):
+def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
     """
-    Create and compile the LangGraph RAG workflow.
+    Create and compile the LangGraph RAG workflow with multi-turn memory.
 
     Args:
-        retriever: Configured FAISS or Pinecone retriever.
+        retriever: Configured vector store retriever (FAISS, Pinecone, etc.).
+        checkpointer: LangGraph checkpointer for state persistence/memory. 
+                      Defaults to MemorySaver if None is provided.
 
     Returns:
-        CompiledStateGraph: Compiled LangGraph application.
+        CompiledStateGraph: Production-ready compiled LangGraph application.
 
     Raises:
         CustomException: If graph creation or compilation fails.
@@ -94,85 +101,141 @@ def create_graph(retriever):
 
         g = StateGraph(State)
 
+        # Default to in-memory checkpointer if none provided
+        if checkpointer is None:
+            checkpointer = MemorySaver()
+
         logging.info("Adding LangGraph nodes.")
 
+        # ------------------------------------------
+        # Cache Nodes
+        # ------------------------------------------
         g.add_node("check_semantic_cache", check_semantic_cache_node)
-        g.add_node("optimized_query_init", optimizer_retrieval_node)
+        g.add_node("save_semantic_cache", save_semantic_cache_node)
 
+        # ------------------------------------------
+        # Retrieval & Routing Nodes
+        # ------------------------------------------
         g.add_node("decide_retrieval", decide_retrieval)
-        g.add_node("generate_direct", generate_direct)
+        g.add_node("query_optimizer", optimizer_retrieval_node)
         g.add_node("retrieve", lambda state: retrieve(state, retriever))
-        # g.add_node("is_relevant", is_relevant)
         g.add_node("check_retrieval_score", check_retrieval_score)
+
+        # ------------------------------------------
+        # Generation Nodes
+        # ------------------------------------------
+        g.add_node("generate_with_tools", generate_with_tools)
         g.add_node("generate_from_context", generate_from_context)
-        g.add_node("no_answer_found", no_answer_found)
+
+        # ------------------------------------------
+        # Answer Verification & Self-Correction
+        # ------------------------------------------
         g.add_node("is_sup", is_sup)
         g.add_node("revise_answer", revise_answer)
         g.add_node("is_use", is_use)
         g.add_node("rewrite_question", rewrite_question)
+
+        # ------------------------------------------
+        # Evaluation & Fallback
+        # ------------------------------------------
         g.add_node("evaluate_answer", evaluate_answer_node)
-        g.add_node("save_semantic_cache", save_semantic_cache_node)
+        g.add_node("no_answer_found", no_answer_found)
 
         logging.info("LangGraph nodes added successfully.")
 
+        # ==================================================
+        # EDGES & ROUTING
+        # ==================================================
         logging.info("Adding LangGraph edges.")
 
+        # 1. Entry Point -> Semantic Cache Check
         g.add_edge(START, "check_semantic_cache")
 
+        # 2. Semantic Cache Routing
         g.add_conditional_edges(
             "check_semantic_cache",
             route_after_cache,
-            {"cached_answer": END, "continue_rag": "decide_retrieval"},
+            {
+                "cached_answer": END,
+                "continue_rag": "decide_retrieval",
+            },
         )
-        g.add_edge("decide_retrieval", "optimized_query_init")
 
+        # 3. Retrieval Decision Routing
         g.add_conditional_edges(
-            "optimized_query_init",
+            "decide_retrieval",
             route_after_decide,
-            {"generate_direct": "generate_direct", "retrieve": "retrieve"},
+            {
+                "generate_with_tools": "generate_with_tools",
+                "retrieve": "retrieve",
+            },
         )
 
-        g.add_edge("generate_direct", END)
+        # 4. Tool Generation -> Evaluation
+        g.add_edge("generate_with_tools", "evaluate_answer")
 
-        # g.add_edge("retrieve", "is_relevant")
+        # 5. Retrieval -> Score Check & Relevance Filtering
         g.add_edge("retrieve", "check_retrieval_score")
 
         g.add_conditional_edges(
             "check_retrieval_score",
-            # "is_relevant",
             route_after_relevance,
-            {"generate_from_context": "generate_from_context", "no_answer_found": "no_answer_found"},
+            {
+                "generate_from_context": "generate_from_context",
+                "query_optimizer": "query_optimizer",
+                "no_answer_found": "no_answer_found",
+            },
         )
 
-        g.add_edge("no_answer_found", END)
+        # 6. Query Optimizer Loop back to Retrieval
+        g.add_edge("query_optimizer", "retrieve")
 
+        # 7. Context Generation -> Support Check (Hallucination Verification)
         g.add_edge("generate_from_context", "is_sup")
 
+        # 8. Support Routing (IsSUP -> Usefulness / Revision / Fallback)
         g.add_conditional_edges(
             "is_sup",
             route_after_issup,
-            {"accept_answer": "is_use", "revise_answer": "revise_answer"},
+            {
+                "accept_answer": "is_use",
+                "revise_answer": "revise_answer",
+                "no_answer_found": "no_answer_found",
+            },
         )
 
+        # 9. Revision Loop back to Support Check
         g.add_edge("revise_answer", "is_sup")
 
+        # 10. Usefulness Routing (IsUSE -> Evaluation / Rewrite / Fallback)
         g.add_conditional_edges(
             "is_use",
             route_after_isuse,
-            {"evaluate_answer": "evaluate_answer", "rewrite_question": "rewrite_question", "no_answer_found": "no_answer_found"},
+            {
+                "evaluate_answer": "evaluate_answer",
+                "rewrite_question": "rewrite_question",
+                "no_answer_found": "no_answer_found",
+            },
         )
 
+        # 11. Rewrite Question Loop back to Retrieval
         g.add_edge("rewrite_question", "retrieve")
 
+        # 12. Save Cache -> END
         g.add_edge("evaluate_answer", "save_semantic_cache")
-
         g.add_edge("save_semantic_cache", END)
+
+        # 13. Fallback -> END
+        g.add_edge("no_answer_found", END)
 
         logging.info("LangGraph edges added successfully.")
 
-        app = g.compile()
+        # ==================================================
+        # COMPILE WITH MEMORY
+        # ==================================================
+        app = g.compile(checkpointer=checkpointer)
 
-        logging.info("LangGraph compiled successfully.")
+        logging.info("LangGraph compiled successfully with checkpointer persistence.")
 
         return app
 
