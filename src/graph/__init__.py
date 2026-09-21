@@ -242,4 +242,5 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
         logging.error(f"Error while creating LangGraph: {str(e)}")
         raise CustomException(e)
 
-# app = graph(retriever)
+# app = create_graph(retrieve)
+# app
