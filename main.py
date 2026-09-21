@@ -44,10 +44,10 @@ async def run_rag(question: str):
 
         final_state = await app.ainvoke(initial_state, config=config)
         
-        print("Prompt tokens:", callback.prompt_tokens)
-        print("Completion tokens:", callback.completion_tokens)
-        print("Total tokens:", callback.total_tokens)
-        print("Total cost:", callback.total_cost)
+        # print("Prompt tokens:", callback.prompt_tokens)
+        # print("Completion tokens:", callback.completion_tokens)
+        # print("Total tokens:", callback.total_tokens)
+        # print("Total cost:", callback.total_cost)
 
         latency_ms = round(
             (time.perf_counter() - start_time) * 1000,
@@ -55,8 +55,11 @@ async def run_rag(question: str):
         )
 
         metrics = {
+            "Prompt tokens": callback.prompt_tokens,
+            "Completion tokens": callback.completion_tokens,
             "latency_ms": latency_ms,
             "tokens_used": callback.total_tokens,
+            "query_cost": callback.total_cost,
         }
 
     production_logger.log_query(
