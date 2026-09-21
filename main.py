@@ -2,7 +2,7 @@ from src.pipeline import pipeline
 import time
 from langchain_community.callbacks import get_openai_callback
 from src.logger.production_logger import ProductionLogger
-
+import asyncio
 
 production_logger = ProductionLogger(
     log_file="logs/rag_production.log"
@@ -16,7 +16,7 @@ config = {
     }
 }
 
-def run_rag(question: str):
+async def run_rag(question: str):
 
     initial_state = {
         "question": question,
@@ -42,7 +42,7 @@ def run_rag(question: str):
 
     with get_openai_callback() as callback:
 
-        final_state = app.invoke(initial_state,config=config)
+        final_state = await app.ainvoke(initial_state, config=config)
         
         print("Prompt tokens:", callback.prompt_tokens)
         print("Completion tokens:", callback.completion_tokens)
@@ -67,7 +67,7 @@ def run_rag(question: str):
     return final_state
 
 if __name__ == "__main__":
-    final_state = run_rag(question="What department does Tanvir Ahmed belong to??")
+    final_state = asyncio.run(run_rag(question="What is cyber security??"))
     print("Final State", final_state)
     print("*"*50)
     print("\nAnswer:", final_state["answer"])
