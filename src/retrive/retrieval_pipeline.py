@@ -6,6 +6,9 @@ from src.vector import create_embedding, create_pincone_database
 from src.constants import CACHE_THRESHOLD, CACHE_VERSION, INDEX_NAME_CACHE_MEMORY,SIMILARITY_THRESHOLD_FIASS,SIMILARITY_THRESHOLD_PINECONE
 from src.exception import CustomException
 from src.logger import logging
+from src.mcp import tavily_mcp_search
+import src.mcp as mcp
+from langchain_core.messages import ToolMessage
 
 from src.chat_model import get_llm
 from src.state import *
@@ -129,13 +132,88 @@ direct_generation_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "Answer using only your general knowledge.\n"
-            "If it requires specific company info, say:\n"
-            "'I don't know based on my general knowledge.'"
+            """
+You are a helpful AI assistant.
+
+Answer the user's question directly.
+
+You have access to a web search tool called Tavily.
+
+Use Tavily when:
+- The question requires current or up-to-date information.
+- The user asks about recent events.
+- The user asks for current prices, news, weather, companies,
+  products, regulations, or other information that may have changed.
+- You are not confident that your internal knowledge is sufficient.
+
+Do NOT use Tavily for:
+- Simple general knowledge.
+- Basic explanations.
+- Mathematics.
+- Programming concepts that do not require current information.
+
+If you use Tavily, use the retrieved information to produce
+the final answer.
+""",
         ),
-        ("human", "{question}"),
+        (
+            "human",
+            "Question: {question}",
+        ),
     ]
 )
+
+
+async def get_tool_llm():
+    await mcp.initialize_mcp()
+
+    return llm.bind_tools(
+        [mcp.search_tool]
+    )
+
+async def generate_with_tools(state: State):
+    try:
+        tool_llm = await get_tool_llm()
+
+        messages = direct_generation_prompt.format_messages(
+            question=state["question"]
+        )
+
+        response = await tool_llm.ainvoke(messages)
+
+        if not response.tool_calls:
+            return {
+                "answer": response.content
+            }
+
+        messages.append(response)
+
+        for tool_call in response.tool_calls:
+
+            if tool_call["name"] == "tavily_search":
+
+                result = await mcp.search_tool.ainvoke(
+                    tool_call["args"]
+                )
+
+                messages.append(
+                    ToolMessage(
+                        content=str(result),
+                        tool_call_id=tool_call["id"]
+                    )
+                )
+
+        final_response = await tool_llm.ainvoke(messages)
+
+        return {
+            "answer": final_response.content
+        }
+
+    except Exception as e:
+        logging.error(
+            f"generate_with_tools failed: {e}"
+        )
+        raise
 
 
 def decide_retrieval(state: State):
@@ -999,3 +1077,16 @@ def route_after_cache(state: State):
 
     return "continue_rag"
 
+
+async def web_search_node(state: State):
+
+    query = (
+        state.get("retrieval_query")
+        or state["question"]
+    )
+
+    result = await tavily_mcp_search(query)
+
+    return {
+        "web_results": result
+    }
