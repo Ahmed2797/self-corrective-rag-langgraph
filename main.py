@@ -10,6 +10,12 @@ production_logger = ProductionLogger(
 
 app = pipeline()
 
+config = {
+    "configurable": {
+        "thread_id": "user_session_101"  # Unique ID per session/user
+    }
+}
+
 def run_rag(question: str):
 
     initial_state = {
@@ -36,7 +42,7 @@ def run_rag(question: str):
 
     with get_openai_callback() as callback:
 
-        final_state = app.invoke(initial_state)
+        final_state = app.invoke(initial_state,config=config)
         
         print("Prompt tokens:", callback.prompt_tokens)
         print("Completion tokens:", callback.completion_tokens)
