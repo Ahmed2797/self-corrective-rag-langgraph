@@ -85,6 +85,9 @@ class ProductionLogger:
             # Performance
             "latency_ms": metrics.get("latency_ms"),
             "tokens_used": metrics.get("tokens_used"),
+            "query_cost": metrics.get("query_cost"),
+            "Completion tokens": metrics.get("Completion tokens"),
+            "Prompt tokens": metrics.get("Prompt tokens"),
         }
 
         self.logger.info(
