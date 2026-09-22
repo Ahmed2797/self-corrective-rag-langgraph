@@ -1,3 +1,9 @@
+import os
+import uuid
+import fitz
+import pdfplumber
+import pandas as pd
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -6,32 +12,14 @@ from langchain_pinecone import PineconeVectorStore
 from src.logger import logging
 from src.exception import CustomException
 from src.chat_model import get_embeddings
-from src.constants import K, IMAGE_DIR
+from src.constants import K, IMAGE_DIR, FAISS_DB_PATH
 from src.vector import create_pincone_database
 
-import uuid
-import fitz
-import pdfplumber
-import pandas as pd
-import os
 
 
 def create_retriever(documents, chunk_size=500, chunk_overlap=50, k=K, index_name=None):
     """
     Create a retriever using Pinecone or FAISS.
-
-    Args:
-        documents (str | list[str]): Path to a single PDF or a list of PDF paths.
-        chunk_size (int): Maximum size of each text chunk.
-        chunk_overlap (int): Number of overlapping characters between chunks.
-        k (int): Number of documents to retrieve.
-        index_name (str): Name of the Pinecone index to use.
-
-    Returns:
-        VectorStoreRetriever: Configured document retriever.
-
-    Raises:
-        CustomException: If retriever creation fails.
     """
     try:
         logging.info("Starting retriever creation.")
@@ -41,27 +29,50 @@ def create_retriever(documents, chunk_size=500, chunk_overlap=50, k=K, index_nam
 
         if index_name:
             logging.info(f"Creating Pinecone retriever for index: {index_name}")
-            retriever = create_retriever_pinecone(documents, index_name=index_name, k=k, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            retriever = create_retriever_pinecone(
+                documents, 
+                index_name=index_name, 
+                k=k, 
+                chunk_size=chunk_size, 
+                chunk_overlap=chunk_overlap
+            )
         else:
-            logging.info("Creating FAISS retriever.")
-
-            docs = []
-
-            for document in documents:
-                logging.info(f"Loading document: {document}")
-                docs.extend(PyPDFLoader(document).load())
-
-            logging.info(f"Loaded {len(docs)} document pages.")
-
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            chunks = text_splitter.split_documents(docs)
-
-            logging.info(f"Created {len(chunks)} text chunks.")
-
+            logging.info("Creating or loading FAISS retriever.")
             embeddings = get_embeddings()
-            vector_store = FAISS.from_documents(chunks, embeddings)
-            retriever = vector_store.as_retriever(search_kwargs={"k": k})
 
+            # ----------------------------------------------------
+            # 1. LOAD FAISS FROM LOCAL DISK IF ALREADY PROCESSED
+            # ----------------------------------------------------
+            if os.path.exists(FAISS_DB_PATH):
+                logging.info(f"Loading existing FAISS store from '{FAISS_DB_PATH}'...")
+                vector_store = FAISS.load_local(
+                    FAISS_DB_PATH,
+                    embeddings,
+                    allow_dangerous_deserialization=True
+                )
+            else:
+                logging.info("No local FAISS index found. Ingesting documents...")
+                docs = []
+                for document in documents:
+                    if not os.path.exists(document):
+                        raise FileNotFoundError(f"Document not found: {document}")
+                    logging.info(f"Loading document: {document}")
+                    docs.extend(PyPDFLoader(document).load())
+
+                logging.info(f"Loaded {len(docs)} document pages.")
+
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                chunks = text_splitter.split_documents(docs)
+
+                logging.info(f"Created {len(chunks)} text chunks.")
+
+                vector_store = FAISS.from_documents(chunks, embeddings)
+                
+                # Save locally for future executions
+                vector_store.save_local(FAISS_DB_PATH)
+                logging.info(f"FAISS index saved successfully to '{FAISS_DB_PATH}'.")
+
+            retriever = vector_store.as_retriever(search_kwargs={"k": k})
             logging.info("FAISS retriever created successfully.")
 
         return retriever
@@ -74,19 +85,6 @@ def create_retriever(documents, chunk_size=500, chunk_overlap=50, k=K, index_nam
 def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_overlap=50):
     """
     Process one or multiple PDF documents and create a Pinecone retriever.
-
-    Args:
-        documents (str | list[str]): Path to a single PDF or a list of PDF paths.
-        index_name (str): Name of the Pinecone index.
-        k (int): Number of documents to retrieve.
-        chunk_size (int): Maximum size of each text chunk.
-        chunk_overlap (int): Number of overlapping characters between chunks.
-
-    Returns:
-        VectorStoreRetriever: Pinecone-based document retriever.
-
-    Raises:
-        CustomException: If Pinecone processing fails.
     """
     try:
         logging.info("Starting Pinecone retriever creation.")
@@ -98,12 +96,29 @@ def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_
         logging.info(f"Using Pinecone index: {index_name}")
 
         index = create_pincone_database(index_name=index_name)
-
         logging.info("Pinecone index initialized successfully.")
 
-        image_files = []
         embeddings = get_embeddings()
+
+        # ----------------------------------------------------
+        # 2. CHECK IF PINECONE INDEX ALREADY HAS DATA
+        # ----------------------------------------------------
+        index_stats = index.describe_index_stats()
+        if index_stats.get("total_vector_count", 0) > 0:
+            logging.info(
+                f"Pinecone index '{index_name}' already contains {index_stats['total_vector_count']} vectors. "
+                "Skipping re-ingestion and connecting directly to index."
+            )
+            return PineconeVectorStore(index=index, embedding=embeddings).as_retriever(search_kwargs={"k": k})
+
+        # ----------------------------------------------------
+        # 3. RUN INGESTION ONLY IF INDEX IS EMPTY
+        # ----------------------------------------------------
+        image_files = []
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        
+        # Ensure image save folder exists
+        os.makedirs(IMAGE_DIR, exist_ok=True)
 
         for file_path in documents:
             logging.info(f"Processing document: {file_path}")
@@ -111,19 +126,16 @@ def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"Document not found: {file_path}")
 
-            doc = fitz.open(file_path)
+            # Safely open with context manager
+            with fitz.open(file_path) as doc:
+                logging.info(f"PDF opened successfully: {file_path}. Pages: {len(doc)}")
 
-            logging.info(f"PDF opened successfully: {file_path}")
-            logging.info(f"Number of pages: {len(doc)}")
-
-            try:
                 with pdfplumber.open(file_path) as pdf:
                     for i, page in enumerate(pdf.pages):
                         text = page.extract_text()
 
                         if text:
                             text_chunks = text_splitter.split_text(text)
-
                             logging.info(f"Page {i + 1}: created {len(text_chunks)} text chunks.")
 
                             for chunk_idx, chunk in enumerate(text_chunks):
@@ -133,7 +145,6 @@ def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_
                                 index.upsert([(vector_id, vector, {"text": chunk, "type": "text", "page": i + 1})])
 
                         tables = page.extract_tables()
-
                         if tables:
                             logging.info(f"Page {i + 1}: found {len(tables)} table(s).")
 
@@ -179,9 +190,6 @@ def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_
 
                 logging.info("Image extraction completed.")
 
-            finally:
-                doc.close()
-
             logging.info(f"Finished processing document: {file_path}")
 
         retriever = PineconeVectorStore(index=index, embedding=embeddings).as_retriever(search_kwargs={"k": k})
@@ -194,3 +202,5 @@ def create_retriever_pinecone(documents, index_name, k=K, chunk_size=500, chunk_
     except Exception as e:
         logging.error(f"Error while creating Pinecone retriever: {str(e)}")
         raise CustomException(e)
+
+    
