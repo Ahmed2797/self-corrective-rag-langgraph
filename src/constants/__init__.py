@@ -1,6 +1,7 @@
 CHUNK_SIZE = 200
 CHUNK_OVERLAP = 50
 K = 4
+MAX_REWRITE_TRIES = 3
 INDEX_NAME_CACHE_MEMORY = "crag-semantic-answer-cache"
 INDEX_NAME = "self-corrective-rag-langgraph"
 IMAGE_DIR = "src/data/images"
@@ -9,3 +10,4 @@ CACHE_THRESHOLD = 0.90
 CACHE_VERSION = "self-rag-v1"
 SIMILARITY_THRESHOLD_FIASS = 0.30
 SIMILARITY_THRESHOLD_PINECONE = 0.70
+FAISS_DB_PATH = "./faiss_index"
