@@ -9,8 +9,8 @@ from src.retrive.retrieval_pipeline import (
     optimizer_retrieval_node,
     check_semantic_cache_node,
     check_retrieval_score,
-    decide_retrieval,
-    # generate_direct,
+    decide_retrieval,decide_route,
+    generate_direct,
     generate_with_tools,
     # is_relevant,
     generate_from_context,
@@ -115,7 +115,8 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
         # ------------------------------------------
         # Retrieval & Routing Nodes
         # ------------------------------------------
-        g.add_node("decide_retrieval", decide_retrieval)
+        # g.add_node("decide_retrieval", decide_retrieval)
+        g.add_node("decide_retrieval", decide_route)
         g.add_node("query_optimizer", optimizer_retrieval_node)
         g.add_node("retrieve", lambda state: retrieve(state, retriever))
         g.add_node("check_retrieval_score", check_retrieval_score)
@@ -123,6 +124,7 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
         # ------------------------------------------
         # Generation Nodes
         # ------------------------------------------
+        g.add_node("generate_direct", generate_direct)
         g.add_node("generate_with_tools", generate_with_tools)
         g.add_node("generate_from_context", generate_from_context)
 
@@ -165,13 +167,15 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
             "decide_retrieval",
             route_after_decide,
             {
+                "generate_direct":"generate_direct",
                 "generate_with_tools": "generate_with_tools",
                 "retrieve": "retrieve",
             },
         )
 
         # 4. Tool Generation -> Evaluation
-        g.add_edge("generate_with_tools", "evaluate_answer")
+        g.add_edge("generate_direct", "save_semantic_cache")
+        g.add_edge("generate_with_tools", "save_semantic_cache")
 
         # 5. Retrieval -> Score Check & Relevance Filtering
         g.add_edge("retrieve", "check_retrieval_score")
