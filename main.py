@@ -70,7 +70,7 @@ async def run_rag(question: str):
     return final_state
 
 if __name__ == "__main__":
-    final_state = asyncio.run(run_rag(question="What is cyber security??"))
+    final_state = asyncio.run(run_rag(question="right now upcomming holiday"))
     print("Final State", final_state)
     print("*"*50)
     print("\nAnswer:", final_state["answer"])
