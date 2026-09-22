@@ -118,7 +118,7 @@ class State(TypedDict):
     # ========================================================
     # Retrieval Decision
     # ========================================================
-
+    route: str
     need_retrieval: bool
     retrieval_query: str
 
@@ -206,6 +206,25 @@ class RetrieveDecision(BaseModel):
         description=(
             "True if external/internal documents are required "
             "to answer the question reliably, otherwise False."
+        ),
+    )
+
+
+class QueryRoute(BaseModel):
+    """
+    Determines how the user question should be answered.
+    """
+
+    route: Literal["rag", "tool", "direct"] = Field(
+        ...,
+        description=(
+            "Select the best route for answering the user's question. "
+            "'rag' means the question requires information from the "
+            "application's internal documents or knowledge base. "
+            "'tool' means the question requires current, real-time, "
+            "external, web-based, or API information. "
+            "'direct' means the question can be answered directly by "
+            "the LLM without internal document retrieval or external tools."
         ),
     )
 
@@ -311,3 +330,5 @@ class CacheMetadata(TypedDict, total=False):
     answer: str
     evaluation: str
     cache_version: str
+
+    
