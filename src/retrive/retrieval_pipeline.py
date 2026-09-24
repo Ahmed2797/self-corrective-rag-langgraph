@@ -11,7 +11,7 @@ from typing import List, Literal
 
 from langchain_core.messages import ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
-
+from langsmith import traceable
 from src.chat_model import get_llm
 from src.constants import (
     CACHE_THRESHOLD,
@@ -249,7 +249,7 @@ direct_generation_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-
+@traceable(name="Get MCP Tool LLM")
 async def get_tool_llm():
     """Initialize MCP web search tools and bind them to the LLM."""
     logging.info("========== Initializing MCP Web Search Tool ==========")
@@ -257,7 +257,7 @@ async def get_tool_llm():
     return llm.bind_tools([mcp.search_tool])
 
 
-async def generate_with_tools(state: State) -> dict:
+async def generate_with_web_tools(state: State) -> dict:
     """Generate an answer using external search tools when required."""
     try:
         print("========== GENERATE WITH TOOLS ==========")
@@ -599,7 +599,6 @@ def accept_answer(state: State) -> dict:
     return {}
 
 
-MAX_RETRIES = 3
 
 def route_after_issup(
     state: State,
@@ -615,7 +614,7 @@ def route_after_issup(
         logging.info("➡️ ACCEPT ANSWER")
         return "accept_answer"
 
-    if retries >= MAX_RETRIES:
+    if retries >= MAX_REWRITE_TRIES:
         logging.info("➡️ MAX RETRIES REACHED → NO ANSWER")
         return "no_answer_found"
 
@@ -686,7 +685,7 @@ def route_after_isuse(
 # =====================================================================
 # SECTION 5: FINAL EVALUATION & SEMANTIC CACHING
 # =====================================================================
-
+@traceable(name="Evaluate Answer Engine")
 def evaluate_answer_node(state: State) -> State:
     """Evaluate final answer quality using automated evaluation engine."""
     try:
@@ -721,7 +720,7 @@ def evaluate_answer_node(state: State) -> State:
         logging.error(f"Error during answer evaluation: {str(e)}")
         raise CustomException(e)
 
-
+@traceable(name="Search Semantic Cache Index")
 def search_semantic_cache(question: str):
     """Search Pinecone cache index for semantically similar query answers."""
     try:
@@ -764,7 +763,7 @@ def search_semantic_cache(question: str):
         logging.error(f"Error searching semantic cache: {str(e)}")
         raise CustomException(e)
 
-
+@traceable(name="Save Semantic Cache Index")
 def save_semantic_cache(
     question: str,
     answer: str,
