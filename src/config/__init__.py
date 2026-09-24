@@ -32,6 +32,12 @@ class Settings(BaseModel):
     max_retrieval_rewrites: int = int(os.getenv("MAX_RETRIEVAL_REWRITES", "2"))
     max_web_rewrites: int = int(os.getenv("MAX_WEB_REWRITES", "2"))
     database_path: str = os.getenv("DATABASE_PATH", "data/audit.db")
+    # Enable LangChain / LangGraph tracing
+    langsmith_tracking :str = os.getenv("LANGSMITH_TRACING",'False')
+    # Provide your LangSmith API Key
+    langsmith_api_key :str = os.getenv("LANGSMITH_API_KEY")
+    langsmith_endpoint :str = os.getenv("LANGSMITH_ENDPOINT")
+    langsmith_project :str = os.getenv("LANGSMITH_PROJECT")
 
     @property
     def database_file(self) -> Path:
