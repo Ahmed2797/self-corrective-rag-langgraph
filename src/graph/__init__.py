@@ -11,7 +11,7 @@ from src.retrive.retrieval_pipeline import (
     check_retrieval_score,
     decide_retrieval,decide_route,
     generate_direct,
-    generate_with_tools,
+    generate_with_web_tools,
     # is_relevant,
     generate_from_context,
     no_answer_found,
@@ -104,43 +104,102 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
         if checkpointer is None:
             checkpointer = MemorySaver()
 
-        logging.info("Adding LangGraph nodes.")
+        logging.info("Adding LangGraph nodes with human-readable display names.")
 
         # ------------------------------------------
         # Cache Nodes
         # ------------------------------------------
-        g.add_node("check_semantic_cache", check_semantic_cache_node)
-        g.add_node("save_semantic_cache", save_semantic_cache_node)
+        g.add_node(
+            "check_semantic_cache", 
+            check_semantic_cache_node, 
+            name="1. Check Semantic Cache"
+        )
+        g.add_node(
+            "save_semantic_cache", 
+            save_semantic_cache_node, 
+            name="11. Save Answer to Semantic Cache"
+        )
 
         # ------------------------------------------
         # Retrieval & Routing Nodes
         # ------------------------------------------
-        # g.add_node("decide_retrieval", decide_retrieval)
-        g.add_node("decide_retrieval", decide_route)
-        g.add_node("query_optimizer", optimizer_retrieval_node)
-        g.add_node("retrieve", lambda state: retrieve(state, retriever))
-        g.add_node("check_retrieval_score", check_retrieval_score)
+        g.add_node(
+            "decide_retrieval", 
+            decide_route, 
+            name="2. Route Query (RAG / Direct / Web Tools)"
+        )
+        g.add_node(
+            "query_optimizer", 
+            optimizer_retrieval_node, 
+            name="4. Optimize Query for Retrieval"
+        )
+        g.add_node(
+            "retrieve", 
+            lambda state: retrieve(state, retriever), 
+            name="3. Retrieve Documents from Vector DB"
+        )
+        g.add_node(
+            "check_retrieval_score", 
+            check_retrieval_score, 
+            name="5. Filter Documents by Similarity Score"
+        )
 
         # ------------------------------------------
         # Generation Nodes
         # ------------------------------------------
-        g.add_node("generate_direct", generate_direct)
-        g.add_node("generate_with_tools", generate_with_tools)
-        g.add_node("generate_from_context", generate_from_context)
+        g.add_node(
+            "generate_direct", 
+            generate_direct, 
+            name="Generate Direct LLM Response"
+        )
+        g.add_node(
+            "web_search_tools", 
+            generate_with_web_tools, 
+            name="Generate Response using Web Tools"
+        )
+        g.add_node(
+            "generate_from_context", 
+            generate_from_context, 
+            name="6. Generate Answer from Context"
+        )
 
         # ------------------------------------------
         # Answer Verification & Self-Correction
         # ------------------------------------------
-        g.add_node("is_sup", is_sup)
-        g.add_node("revise_answer", revise_answer)
-        g.add_node("is_use", is_use)
-        g.add_node("rewrite_question", rewrite_question)
+        g.add_node(
+            "is_sup", 
+            is_sup, 
+            name="7. Groundedness Critic (Is Answer Supported?)"
+        )
+        g.add_node(
+            "revise_answer", 
+            revise_answer, 
+            name="8. Revise Answer Using Context Quotes"
+        )
+        g.add_node(
+            "is_use", 
+            is_use, 
+            name="9. Usefulness Critic (Is Answer Relevant?)"
+        )
+        g.add_node(
+            "rewrite_question", 
+            rewrite_question, 
+            name="12. Rewrite Query for Better Search"
+        )
 
         # ------------------------------------------
         # Evaluation & Fallback
         # ------------------------------------------
-        g.add_node("evaluate_answer", evaluate_answer_node)
-        g.add_node("no_answer_found", no_answer_found)
+        g.add_node(
+            "evaluate_answer", 
+            evaluate_answer_node, 
+            name="10. Final Answer Evaluation & Quality Metrics"
+        )
+        g.add_node(
+            "no_answer_found", 
+            no_answer_found, 
+            name="Fallback: No Answer Found"
+        )
 
         logging.info("LangGraph nodes added successfully.")
 
@@ -167,15 +226,15 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
             "decide_retrieval",
             route_after_decide,
             {
-                "generate_direct":"generate_direct",
-                "generate_with_tools": "generate_with_tools",
+                "generate_direct": "generate_direct",
+                "web_search_tools": "web_search_tools",
                 "retrieve": "retrieve",
             },
         )
 
-        # 4. Tool Generation -> Evaluation
+        # 4. Tool / Direct Generation -> Save Cache
         g.add_edge("generate_direct", "save_semantic_cache")
-        g.add_edge("generate_with_tools", "save_semantic_cache")
+        g.add_edge("web_search_tools", "save_semantic_cache")
 
         # 5. Retrieval -> Score Check & Relevance Filtering
         g.add_edge("retrieve", "check_retrieval_score")
