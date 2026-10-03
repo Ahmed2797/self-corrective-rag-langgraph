@@ -8,7 +8,7 @@ production_logger = ProductionLogger(
     log_file="logs/rag_production.log"
 )
 
-app = pipeline()
+app = pipeline('test_run')
 
 config = {
     "configurable": {
