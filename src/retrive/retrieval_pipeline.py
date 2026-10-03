@@ -4,9 +4,10 @@ Self-Corrective RAG Node Pipeline
 This module contains the nodes and conditional router logic used within 
 the LangGraph RAG application state workflow.
 """
-
+import sys
 import json
 import uuid
+import asyncio
 from typing import List, Literal
 
 from langchain_core.messages import ToolMessage
@@ -141,7 +142,7 @@ def decide_route(state: State) -> dict:
         return {"route": decision.route}
     except Exception as e:
         logging.error(f"Error in query routing: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def decide_retrieval(state: State) -> dict:
@@ -158,12 +159,12 @@ def decide_retrieval(state: State) -> dict:
         return {"need_retrieval": decision.should_retrieve}
     except Exception as e:
         logging.error(f"Error in decide_retrieval: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
-# def route_after_decide(state: State) -> Literal["generate_with_tools", "retrieve"]:
+# def route_after_decide(state: State) -> Literal["web_search_tools", "retrieve"]:
 #     """Conditional Edge: Route based on retrieval decision."""
-    # return "retrieve" if state["need_retrieval"] else "generate_with_tools"
+    # return "retrieve" if state["need_retrieval"] else "web_search_tools"
 
 def route_after_decide(state: State):
     """
@@ -172,7 +173,7 @@ def route_after_decide(state: State):
     Returns:
         str:
             - "retrieve" for internal RAG retrieval.
-            - "generate_with_tools" for external tools/web.
+            - "web_search_tools" for external tools/web.
             - "generate_direct" for direct LLM generation.
     """
     route = state.get("route")
@@ -183,7 +184,7 @@ def route_after_decide(state: State):
         return "retrieve"
 
     if route == "tool":
-        return "generate_with_tools"
+        return "web_search_tools"
 
     if route == "direct":
         return "generate_direct"
@@ -250,56 +251,48 @@ direct_generation_prompt = ChatPromptTemplate.from_messages(
 
 
 @traceable(name="Get MCP Tool LLM")
-async def get_tool_llm():
+def get_tool_llm():
     """Initialize MCP web search tools and bind them to the LLM."""
     logging.info("========== Initializing MCP Web Search Tool ==========")
-    await mcp.initialize_mcp()
+    asyncio.run(mcp.initialize_mcp())
     return llm.bind_tools([mcp.search_tool])
 
 
-async def generate_with_web_tools(state: State) -> dict:
+def generate_with_web_tools(state: State) -> dict:
     """Generate an answer using external search tools when required."""
     try:
         print("========== GENERATE WITH TOOLS ==========")
         logging.info("========== GENERATE WITH TOOLS ==========")
 
-        tool_llm = await get_tool_llm()
+        tool_llm = get_tool_llm()
 
         messages = direct_generation_prompt.format_messages(
             question=state["question"]
         )
 
         logging.info("Calling tool-enabled LLM...")
-        response = await tool_llm.ainvoke(messages)
+        response = tool_llm.invoke(messages)
 
         logging.info(f"Initial LLM response: {response}")
         logging.info(f"Tool calls: {response.tool_calls}")
 
-        # No tool required
         if not response.tool_calls:
             logging.info("No tool call detected.")
             return {
                 "answer": response.content
             }
 
-        # Add assistant tool-call message
         messages.append(response)
 
         for tool_call in response.tool_calls:
-
             logging.info(
                 f"Executing tool: {tool_call['name']} "
                 f"with args: {tool_call['args']}"
             )
 
             if tool_call["name"] == "tavily_search":
-
-                result = await mcp.search_tool.ainvoke(
-                    tool_call["args"]
-                )
-
+                result = asyncio.run(mcp.search_tool.ainvoke(tool_call["args"]))
                 logging.info(f"Tavily result: {result}")
-
                 messages.append(
                     ToolMessage(
                         content=str(result),
@@ -307,10 +300,8 @@ async def generate_with_web_tools(state: State) -> dict:
                     )
                 )
 
-        # Ask LLM to generate final answer using tool result
         logging.info("Calling LLM for final answer...")
-
-        final_response = await tool_llm.ainvoke(messages)
+        final_response = tool_llm.invoke(messages)
 
         logging.info(
             f"Final answer generated: {final_response.content}"
@@ -322,9 +313,9 @@ async def generate_with_web_tools(state: State) -> dict:
 
     except Exception as e:
         logging.error(
-            f"generate_with_tools failed: {str(e)}"
+            f"web_search_tools failed: {str(e)}"
         )
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def generate_direct(state: State) -> dict:
@@ -339,7 +330,7 @@ def generate_direct(state: State) -> dict:
         return {"answer": out.content}
     except Exception as e:
         logging.error(f"Error in generate_direct: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 # =====================================================================
@@ -368,29 +359,110 @@ rag_generation_prompt = ChatPromptTemplate.from_messages(
             "You are a business RAG chatbot.\n\n"
             "You will receive a CONTEXT block from internal company documents.\n"
             "Task: Answer the question based on the context.\n"
-            "Do NOT mention that you received context in your output answer.",
+            "Do NOT mention that you received context in your output answer.\n"
+            "If the question is not supported by the provided context, clearly state that the answer is based only on the uploaded project documents.",
         ),
         ("human", "Question:\n{question}\n\nContext:\n{context}"),
     ]
 )
 
 
+def _normalize_text(value: str) -> str:
+    return " ".join(str(value or "").lower().replace("\n", " ").split())
+
+
+def _extract_keywords(question: str) -> List[str]:
+    text = _normalize_text(question)
+    tokens = [token for token in text.replace("?", " ").replace(".", " ").split() if len(token) > 2]
+    seen = set()
+    keyword_list = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            keyword_list.append(token)
+    return keyword_list
+
+
+def _compute_keyword_overlap(doc_text: str, keywords: List[str]) -> float:
+    if not keywords:
+        return 0.0
+    normalized = _normalize_text(doc_text)
+    score = 0.0
+    for keyword in keywords:
+        if keyword in normalized:
+            score += 1.0
+    return min(1.0, score / max(len(keywords), 1))
+
+
+def _extract_best_snippet(doc_text: str, keywords: List[str], max_chars: int = 220) -> str:
+    normalized_text = _normalize_text(doc_text)
+    if not keywords:
+        return normalized_text[:max_chars]
+    for keyword in keywords:
+        idx = normalized_text.find(keyword)
+        if idx != -1:
+            start = max(0, idx - 80)
+            end = min(len(normalized_text), idx + 180)
+            snippet = normalized_text[start:end].strip()
+            if snippet:
+                return snippet[:max_chars]
+    return normalized_text[:max_chars]
+
+
+def rerank_documents(docs_with_scores, query: str):
+    """Blend semantic vector similarity and lexical coverage for stronger retrieval ranking."""
+    keywords = _extract_keywords(query)
+    ranked = []
+
+    for doc, score in docs_with_scores:
+        semantic_part = 1.0 if score is None else max(0.0, 1.0 - min(abs(float(score)), 1.0))
+        lexical_part = _compute_keyword_overlap(doc.page_content, keywords)
+        hybrid_score = (0.7 * semantic_part) + (0.3 * lexical_part)
+        ranked.append({
+            "doc": doc,
+            "score": float(score) if score is not None else 0.0,
+            "hybrid_score": hybrid_score,
+            "lexical_part": lexical_part,
+        })
+
+    ranked.sort(key=lambda item: item["hybrid_score"], reverse=True)
+    return ranked
+
+
 def check_retrieval_score(state: State) -> State:
-    """Filter retrieved documents based on vector distance metrics."""
+    """Keep close FAISS matches, with a keyword fallback for relevant chunks."""
     try:
         docs = state.get("docs", [])
         scores = state.get("retrieval_scores", [])
         relevant_docs = []
 
         for doc, score in zip(docs, scores):
-            if score <= SIMILARITY_THRESHOLD_FIASS:  # FAISS threshold
+            if score <= SIMILARITY_THRESHOLD_FIASS:
                 relevant_docs.append(doc)
+
+        # A strict vector cutoff can discard useful chunks for short or
+        # document-specific questions. Keep the best lexical match among the
+        # already retrieved top-k candidates when that happens.
+        if not relevant_docs and docs:
+            keywords = _extract_keywords(state.get("question", ""))
+            lexical_matches = [
+                (doc, _compute_keyword_overlap(doc.page_content, keywords))
+                for doc in docs
+            ]
+            best_doc, best_overlap = max(lexical_matches, key=lambda item: item[1])
+            if best_overlap > 0:
+                relevant_docs = [best_doc]
+                logging.info(
+                    "Vector threshold rejected all results; retaining the best "
+                    "lexical match (overlap=%.3f).",
+                    best_overlap,
+                )
 
         logging.info(f"Relevant documents passing score threshold: {len(relevant_docs)}/{len(docs)}")
         return {"relevant_docs": relevant_docs}
     except Exception as e:
         logging.error(f"Retrieval score check failed: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def is_relevant(state: State) -> dict:
@@ -413,7 +485,7 @@ def is_relevant(state: State) -> dict:
         return {"relevant_docs": relevant_docs}
     except Exception as e:
         logging.error(f"Error in is_relevant: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def route_after_relevance(state: State) -> Literal["generate_from_context", "no_answer_found"]:
@@ -427,13 +499,35 @@ def generate_from_context(state: State) -> dict:
     """Generate answer using retrieved relevant document chunks."""
     try:
         logging.info("Generating answer from retrieved context.")
+        relevant_docs = state.get("relevant_docs", []) or []
         context = "\n\n---\n\n".join(
-            [d.page_content for d in state.get("relevant_docs", [])]
+            [d.page_content for d in relevant_docs]
         ).strip()
+
+        sources = []
+        citations = []
+        keywords = _extract_keywords(state.get("question", ""))
+
+        for doc in relevant_docs:
+            source_name = doc.metadata.get("source") or doc.metadata.get("file_name") or doc.metadata.get("name")
+            if source_name:
+                sources.append(str(source_name))
+
+            snippet = _extract_best_snippet(doc.page_content, keywords)
+            citations.append({
+                "source": str(source_name or "Document"),
+                "snippet": snippet,
+            })
 
         if not context:
             logging.warning("No relevant context available.")
-            return {"answer": "No answer found.", "context": ""}
+            return {
+                "answer": "I can only answer based on the uploaded project documents. No relevant information was found for this question.",
+                "context": "",
+                "sources": [],
+                "citations": [],
+                "confidence_score": 0.0,
+            }
 
         out = llm.invoke(
             rag_generation_prompt.format_messages(
@@ -442,15 +536,31 @@ def generate_from_context(state: State) -> dict:
         )
         logging.info("RAG answer generated successfully.")
 
-        return {"answer": out.content, "context": context}
+        lexical_scores = [_compute_keyword_overlap(doc.page_content, keywords) for doc in relevant_docs]
+        avg_overlap = sum(lexical_scores) / max(len(lexical_scores), 1)
+        confidence_score = round(max(0.4, min(0.99, 0.45 + (avg_overlap * 0.55))), 3)
+
+        return {
+            "answer": out.content,
+            "context": context,
+            "sources": sources,
+            "citations": citations,
+            "confidence_score": confidence_score,
+        }
     except Exception as e:
         logging.error(f"Error in generate_from_context: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def no_answer_found(state: State) -> dict:
     """Fallback node when context is missing or irrelevant."""
-    return {"answer": "No answer found.", "context": ""}
+    return {
+        "answer": "I can only answer based on the uploaded project documents. No relevant information was found for this question.",
+        "context": "",
+        "sources": [],
+        "citations": [],
+        "confidence_score": 0.0,
+    }
 
 
 # =====================================================================
@@ -718,7 +828,7 @@ def evaluate_answer_node(state: State) -> State:
 
     except Exception as e:
         logging.error(f"Error during answer evaluation: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 @traceable(name="Search Semantic Cache Index")
 def search_semantic_cache(question: str):
@@ -761,7 +871,7 @@ def search_semantic_cache(question: str):
 
     except Exception as e:
         logging.error(f"Error searching semantic cache: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 @traceable(name="Save Semantic Cache Index")
 def save_semantic_cache(
@@ -795,7 +905,7 @@ def save_semantic_cache(
 
     except Exception as e:
         logging.error(f"Error saving semantic cache: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def check_semantic_cache_node(state: State) -> dict:
@@ -824,7 +934,7 @@ def check_semantic_cache_node(state: State) -> dict:
 
     except Exception as e:
         logging.error(f"Error checking semantic cache: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 # -----------------------------
 # 11) Memory Cache Decision Node
@@ -841,7 +951,7 @@ def save_semantic_cache_node(state: State) -> State:
         evaluation=state.get("evaluation"),
     )
 
-    return {}
+    return {"cache_saved": True}
 
 
 def route_after_cache(state: State):
@@ -853,14 +963,14 @@ def route_after_cache(state: State):
     return "continue_rag"
 
 
-async def web_search_node(state: State):
+def web_search_node(state: State):
 
     query = (
         state.get("retrieval_query")
         or state["question"]
     )
 
-    result = await mcp.tavily_mcp_search(query)
+    result = asyncio.run(mcp.tavily_mcp_search(query))
 
     return {
         "web_results": result
