@@ -129,6 +129,9 @@ class State(TypedDict):
     docs: List[Document]
     relevant_docs: List[Document]
     retrieval_scores: list
+    sources: List[str]
+    citations: List[dict]
+    confidence_score: float
 
     # ========================================================
     # Generated Answer
