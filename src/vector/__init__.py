@@ -1,8 +1,6 @@
 import os
 from pinecone import Pinecone, ServerlessSpec
 from src.chat_model import get_embeddings
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
 
 def create_pincone_database(index_name:str):
@@ -13,6 +11,10 @@ def create_pincone_database(index_name:str):
         pc.Index: Connected Pinecone index.
     """
     # 1. Check if the index exists; if not, create it
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise ValueError("PINECONE_API_KEY is required to use Pinecone.")
+    pc = Pinecone(api_key=api_key)
     existing_indexes = [idx.name for idx in pc.list_indexes()]
 
     if index_name not in existing_indexes:
@@ -31,9 +33,6 @@ def create_pincone_database(index_name:str):
 
 
 
-# 3. Initialize embeddings
-embeddings = get_embeddings()
-
 def create_embedding(text: str) -> list[float]:
     # embed_query takes a string and returns a list of floats
-    return embeddings.embed_query(text)
+    return get_embeddings().embed_query(text)
