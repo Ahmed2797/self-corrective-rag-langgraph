@@ -1,3 +1,4 @@
+import sys
 from typing import Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -12,7 +13,6 @@ from src.retrive.retrieval_pipeline import (
     decide_retrieval,decide_route,
     generate_direct,
     generate_with_web_tools,
-    # is_relevant,
     generate_from_context,
     no_answer_found,
     is_sup,
@@ -26,6 +26,7 @@ from src.retrive.retrieval_pipeline import (
     route_after_relevance,
     route_after_issup,
     route_after_isuse,
+    rerank_documents,
 )
 
 
@@ -57,27 +58,30 @@ def retrieve(state: State, retriever) -> State:
 
         docs = []
         retrieval_scores = []
+        ranked = rerank_documents(docs_with_scores, query)
 
-        for doc, score in docs_with_scores:
-            # if score <= SIMILARITY_THRESHOLD:
-            docs.append(doc)
-            retrieval_scores.append(float(score))
+        for item in ranked:
+            docs.append(item["doc"])
+            retrieval_scores.append(float(item["score"]))
+
+        confidence_score = round(sum(item["hybrid_score"] for item in ranked) / max(len(ranked), 1), 3)
 
         logging.info(
-            f"Retrieved {len(docs)} documents, "
-            f"{len(retrieval_scores)} passed similarity threshold."
+            f"Retrieved {len(docs)} documents after hybrid reranking; "
+            f"confidence={confidence_score}."
         )
 
         return {
             "docs": docs,
             "retrieval_scores": retrieval_scores,
+            "confidence_score": confidence_score,
         }
 
     except Exception as e:
         logging.error(
             f"Error during document retrieval: {str(e)}"
         )
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 
 def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
@@ -303,7 +307,7 @@ def create_graph(retriever, checkpointer: Optional[BaseCheckpointSaver] = None):
 
     except Exception as e:
         logging.error(f"Error while creating LangGraph: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
 
 # app = create_graph(retrieve)
 # app
