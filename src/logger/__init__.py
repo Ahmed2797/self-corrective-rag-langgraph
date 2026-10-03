@@ -16,6 +16,11 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# HTTP request debug records can include credential-bearing query strings.
+# Keep those URLs out of application log files.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # log message
 logging.info("Logging Message Successful")
 
