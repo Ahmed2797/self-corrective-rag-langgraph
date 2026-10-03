@@ -1,15 +1,16 @@
-from src.retrive import create_retriever
-from src.constants import CHUNK_SIZE, CHUNK_OVERLAP, K, DOCUMENTS
+from src.retrive import get_project_retriever
+# from src.constants import CHUNK_SIZE, CHUNK_OVERLAP, K, DOCUMENTS
 from src.graph import create_graph
 from src.exception import CustomException
 from src.logger import logging
+import sys
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 # MemorySaver with:
 memory = SqliteSaver.from_conn_string("file:///path/to/db.sqlite")
 
 
-def pipeline():
+def pipeline(project_id: str):
     """
     Create the retriever and compile the LangGraph RAG pipeline.
 
@@ -22,15 +23,8 @@ def pipeline():
     try:
         logging.info("Starting the RAG pipeline.")
 
-        documents = DOCUMENTS
-
         logging.info("Creating document retriever.")
-        retriever = create_retriever(
-            documents,
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-            k=K
-        )
+        retriever = get_project_retriever(project_id)
 
         logging.info("Retriever created successfully.")
 
@@ -44,4 +38,4 @@ def pipeline():
 
     except Exception as e:
         logging.error(f"Error in RAG pipeline: {str(e)}")
-        raise CustomException(e)
+        raise CustomException(e, sys)
