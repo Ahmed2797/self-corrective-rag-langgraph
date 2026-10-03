@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 from datetime import datetime, timezone
 from src.state import State
 
@@ -15,6 +16,9 @@ class ProductionLogger:
 
         if not self.logger.handlers:
             formatter = logging.Formatter("%(message)s")
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
 
             file_handler = logging.FileHandler(
                 log_file,
@@ -37,6 +41,8 @@ class ProductionLogger:
 
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": metrics.get("status", "success"),
+            "error": metrics.get("error") or None,
 
             # Query
             "question": state.get("question", ""),
