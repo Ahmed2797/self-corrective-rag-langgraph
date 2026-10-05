@@ -1,0 +1,192 @@
+name: Deploy Self Rag Application Docker Image to EC2
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+
+  # ==========================================================
+  # CONTINUOUS INTEGRATION
+  # ==========================================================
+
+  Continuous-Integration:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Building image:"
+          echo "$IMAGE_URI"
+
+          docker build \
+            -t "$IMAGE_URI" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            .
+
+          echo "Pushing image..."
+
+          docker push "$IMAGE_URI"
+
+          docker push \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+
+  # ==========================================================
+  # CONTINUOUS DEPLOYMENT
+  # ==========================================================
+
+  Continuous-Deployment:
+
+    needs: Continuous-Integration
+
+    runs-on: self-hosted
+
+    steps:
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull latest Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Pulling image:"
+          echo "$IMAGE_URI"
+
+          docker pull "$IMAGE_URI"
+
+
+      - name: Stop old container
+        run: |
+
+          docker stop agentic-chatbot || true
+
+          docker rm agentic-chatbot || true
+
+
+      - name: Run new Docker container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          IMAGE_TAG: ${{ github.sha }}
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
+          PINECONE_NAMESPACE: ${{ secrets.PINECONE_NAMESPACE }}
+
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
+          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
+
+        run: |
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Starting container..."
+
+          docker run -d \
+            --name agentic-chatbot \
+            --restart unless-stopped \
+            -p 8501:8501 \
+            -v agentic_chatbot_data:/app/data \
+            -v agentic_chatbot_uploads:/app/uploads \
+            -v agentic_chatbot_faiss:/app/faiss_index_projects \
+            -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+            -e OPENAI_MODEL="$OPENAI_MODEL" \
+            -e PINECONE_API_KEY="$PINECONE_API_KEY" \
+            -e PINECONE_INDEX_NAME="$PINECONE_INDEX_NAME" \
+            -e PINECONE_NAMESPACE="$PINECONE_NAMESPACE" \
+            -e TAVILY_API_KEY="$TAVILY_API_KEY" \
+            -e LANGSMITH_TRACING="$LANGSMITH_TRACING" \
+            -e LANGSMITH_API_KEY="$LANGSMITH_API_KEY" \
+            -e LANGSMITH_ENDPOINT="$LANGSMITH_ENDPOINT" \
+            -e LANGSMITH_PROJECT="$LANGSMITH_PROJECT" \
+            "$IMAGE_URI"
+
+
+      - name: Wait for application
+        run: |
+
+          echo "Waiting for Streamlit..."
+
+          for i in {1..12}; do
+
+            if curl \
+              --fail \
+              --silent \
+              http://localhost:8501/_stcore/health \
+              > /dev/null; then
+
+              echo "Application is healthy."
+
+              exit 0
+
+            fi
+
+            echo "Application is not ready yet..."
+
+            sleep 5
+
+          done
+
+          echo "Application failed health check."
+
+          docker logs agentic-chatbot
+
+          exit 1
+
+
+      - name: Show container status
+        run: |
+
+          docker ps \
+            --filter "name=agentic-chatbot"
+
+
+      - name: Cleanup unused Docker images
+        run: |
+
+          docker image prune -af
