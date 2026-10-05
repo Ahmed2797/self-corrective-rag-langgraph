@@ -1,45 +1,66 @@
-name: Deploy Self Rag Application Docker Image to EC2
+name: Deploy Self RAG Application to EC2
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# env:
+#   AWS_REGION: ${{ vars.AWS_REGION }}
+#   ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+#   CONTAINER_NAME: agentic-chatbot
+#   CONTAINER_PORT: 8501
+#   HOST_PORT: 8501
 
 jobs:
 
   # ==========================================================
-  # CONTINUOUS INTEGRATION
+  # CONTINUOUS INTEGRATION + BUILD + PUSH
   # ==========================================================
 
   Continuous-Integration:
-
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      # --------------------------------------------------------
+      # Configure AWS
+      # --------------------------------------------------------
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # --------------------------------------------------------
+      # Login to ECR
+      # --------------------------------------------------------
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and Push Docker Image
+      # --------------------------------------------------------
+      # Build Docker Image
+      # --------------------------------------------------------
+
+      - name: Build Docker Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Building image:"
+          echo "Building Docker image:"
           echo "$IMAGE_URI"
 
           docker build \
@@ -47,9 +68,23 @@ jobs:
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
             .
 
-          echo "Pushing image..."
+      # --------------------------------------------------------
+      # Push Docker Image
+      # --------------------------------------------------------
+
+      - name: Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Pushing:"
+          echo "$IMAGE_URI"
 
           docker push "$IMAGE_URI"
+
+          echo "Pushing latest tag..."
 
           docker push \
             "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
@@ -60,59 +95,69 @@ jobs:
   # ==========================================================
 
   Continuous-Deployment:
-
+    name: Deploy to EC2
     needs: Continuous-Integration
-
     runs-on: self-hosted
 
     steps:
 
-      - name: Configure AWS credentials
+      # --------------------------------------------------------
+      # Configure AWS
+      # --------------------------------------------------------
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # --------------------------------------------------------
+      # Login to ECR
+      # --------------------------------------------------------
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Pull latest Docker image
+      # --------------------------------------------------------
+      # Pull New Docker Image
+      # --------------------------------------------------------
+
+      - name: Pull Docker Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Pulling image:"
+          echo "Pulling Docker image:"
           echo "$IMAGE_URI"
 
           docker pull "$IMAGE_URI"
 
+      # --------------------------------------------------------
+      # Stop Old Container
+      # --------------------------------------------------------
 
-      - name: Stop old container
+      - name: Stop Old Container
         run: |
+          docker stop "$CONTAINER_NAME" || true
+          docker rm "$CONTAINER_NAME" || true
 
-          docker stop agentic-chatbot || true
+      # --------------------------------------------------------
+      # Run New Container
+      # --------------------------------------------------------
 
-          docker rm agentic-chatbot || true
-
-
-      - name: Run new Docker container
+      - name: Run New Docker Container
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
 
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
-          PINECONE_NAMESPACE: ${{ secrets.PINECONE_NAMESPACE }}
 
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
 
@@ -122,15 +167,15 @@ jobs:
           LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
 
         run: |
-
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
           echo "Starting container..."
+          echo "Image: $IMAGE_URI"
 
           docker run -d \
-            --name agentic-chatbot \
+            --name "$CONTAINER_NAME" \
             --restart unless-stopped \
-            -p 8501:8501 \
+            -p "$HOST_PORT:$CONTAINER_PORT" \
             -v agentic_chatbot_data:/app/data \
             -v agentic_chatbot_uploads:/app/uploads \
             -v agentic_chatbot_faiss:/app/faiss_index_projects \
@@ -146,11 +191,13 @@ jobs:
             -e LANGSMITH_PROJECT="$LANGSMITH_PROJECT" \
             "$IMAGE_URI"
 
+      # --------------------------------------------------------
+      # Wait for Streamlit
+      # --------------------------------------------------------
 
-      - name: Wait for application
+      - name: Health Check
         run: |
-
-          echo "Waiting for Streamlit..."
+          echo "Waiting for Streamlit application..."
 
           for i in {1..12}; do
 
@@ -160,33 +207,45 @@ jobs:
               http://localhost:8501/_stcore/health \
               > /dev/null; then
 
-              echo "Application is healthy."
+              echo "======================================"
+              echo "Streamlit application is healthy."
+              echo "======================================"
 
               exit 0
-
             fi
 
             echo "Application is not ready yet..."
+            echo "Attempt: $i/12"
 
             sleep 5
 
           done
 
+          echo "======================================"
           echo "Application failed health check."
+          echo "======================================"
 
-          docker logs agentic-chatbot
+          echo "Container status:"
+          docker ps -a --filter "name=$CONTAINER_NAME"
+
+          echo "Container logs:"
+          docker logs "$CONTAINER_NAME"
 
           exit 1
 
+      # --------------------------------------------------------
+      # Show Container Status
+      # --------------------------------------------------------
 
-      - name: Show container status
+      - name: Show Container Status
         run: |
-
           docker ps \
-            --filter "name=agentic-chatbot"
+            --filter "name=$CONTAINER_NAME"
 
+      # --------------------------------------------------------
+      # Cleanup Old Docker Images
+      # --------------------------------------------------------
 
-      - name: Cleanup unused Docker images
+      - name: Cleanup Docker Images
         run: |
-
           docker image prune -af
