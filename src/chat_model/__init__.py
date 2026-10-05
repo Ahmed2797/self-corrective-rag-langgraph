@@ -14,7 +14,7 @@ def get_llm():
         responses using temperature=0.
     """
     llm = ChatOpenAI(
-        model="gpt-4o-mini",
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
         api_key=os.getenv("OPENAI_API_KEY")
     )
@@ -37,4 +37,3 @@ def get_embeddings():
     )
 
     return embeddings
-
