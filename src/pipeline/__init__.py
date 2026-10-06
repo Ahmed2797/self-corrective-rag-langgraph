@@ -1,13 +1,15 @@
+import sys
+import sqlite3
 from src.retrive import get_project_retriever
-# from src.constants import CHUNK_SIZE, CHUNK_OVERLAP, K, DOCUMENTS
 from src.graph import create_graph
 from src.exception import CustomException
 from src.logger import logging
-import sys
 
 from langgraph.checkpoint.sqlite import SqliteSaver
-# MemorySaver with:
-memory = SqliteSaver.from_conn_string("file:///path/to/db.sqlite")
+
+# Initialize SQLite database connection for checkpointing
+db_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+memory = SqliteSaver(db_conn)
 
 
 def pipeline(project_id: str):
@@ -23,14 +25,16 @@ def pipeline(project_id: str):
     try:
         logging.info("Starting the RAG pipeline.")
 
-        logging.info("Creating document retriever.")
-        retriever = get_project_retriever(project_id)
+        # Ensure project_id matches Pinecone index naming rules (lowercase, hyphens only)
+        formatted_project_id = str(project_id).lower().replace("_", "-")
+
+        logging.info(f"Creating document retriever for project: {formatted_project_id}")
+        retriever = get_project_retriever(formatted_project_id)
 
         logging.info("Retriever created successfully.")
 
         logging.info("Creating LangGraph application.")
-        app = create_graph(retriever=retriever)
-        # app = create_graph(retriever=retriever,checkpointer=memory)
+        app = create_graph(retriever=retriever, checkpointer=memory)
 
         logging.info("LangGraph application created successfully.")
 
@@ -39,3 +43,4 @@ def pipeline(project_id: str):
     except Exception as e:
         logging.error(f"Error in RAG pipeline: {str(e)}")
         raise CustomException(e, sys)
+    
