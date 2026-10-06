@@ -91,6 +91,10 @@ jobs:
     name: Deploy to EC2
     needs: Continuous-Integration
     runs-on: self-hosted
+    env:
+      ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+      IMAGE_TAG: ${{ github.sha }}
+      CONTAINER_NAME: self-rag
 
     steps:
 
@@ -144,9 +148,9 @@ jobs:
       # --------------------------------------------------------
       - name: Run New Docker Container
         env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           HOST_PORT: 8501
           CONTAINER_PORT: 8501
-          CONTAINER_NAME: self-rag
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
@@ -159,8 +163,6 @@ jobs:
         
         run: |
           set -e
-
-          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
