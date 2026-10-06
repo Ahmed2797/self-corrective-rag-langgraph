@@ -1,8 +1,52 @@
-# Self-Corrective Agentic RAG langgraph
+# 🧠 Self-Corrective RAG System with LangGraph
 
-An enterprise-grade, evaluation-driven **Self-Corrective RAG (Retrieval-Augmented Generation)** engine built with **LangGraph**, **Pinecone**, and **OpenAI**[cite: 1].
+> **Production-oriented Retrieval-Augmented Generation system with intelligent routing, semantic caching, web search, self-correction, evaluation, project-based knowledge management, and a Streamlit interface.**
 
-The system goes beyond standard single-pass RAG by dynamically evaluating its own outputs, self-correcting hallucinations, rewriting queries when necessary, and running an automated evaluation suite before returning answers[cite: 1].
+A modular **Self-Corrective RAG (Retrieval-Augmented Generation)** system designed to answer questions using the right information source while continuously evaluating and improving its responses.
+
+The system combines **LangGraph, LLMs, vector search, semantic caching, web search, answer evaluation, query rewriting, and persistent conversation memory** into a single end-to-end AI application.
+
+---
+
+<!-- <p align="center"> -->
+
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Workflow-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/langgraph)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Frontend-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![License](https://img.shields.io/github/license/Ahmed2797/self-corrective-rag-langgraph)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/Ahmed2797/self-corrective-rag-langgraph?style=flat&logo=github)](https://github.com/Ahmed2797/self-corrective-rag-langgraph)
+[![Status](https://img.shields.io/badge/Status-In%20Development-orange)](https://github.com/Ahmed2797/self-corrective-rag-langgraph)
+
+<!-- </p> -->
+
+---
+
+![AI](frontend/rag-img.png)
+
+## 🚀 What Problem Does This Solve?
+
+Traditional RAG systems usually follow a simple pipeline:
+
+```text
+Question
+   ↓
+Retrieve Documents
+   ↓
+Generate Answer
+```
+
+This approach can fail when:
+
+* The question does not require document retrieval.
+* Retrieved documents are irrelevant.
+* The information is outdated.
+* The generated answer contains hallucinations.
+* The user asks a question requiring real-time web information.
+* The original query is poorly formulated.
+* The same question is repeatedly asked.
+* There is insufficient evidence to support the answer.
+
+This project addresses these problems by introducing **adaptive routing and self-correction**.
 
 ---
 
@@ -18,6 +62,7 @@ The system goes beyond standard single-pass RAG by dynamically evaluating its ow
 
 ## 🏗️ Architecture Flow
 
+```bash
                          ┌──────────────────┐
                          │    User Query    │
                          └────────┬─────────┘
@@ -111,12 +156,121 @@ The system goes beyond standard single-pass RAG by dynamically evaluating its ow
                         ▼
                        END
 
+```
+
 ## 🛠️ Tech Stack
 
 * **Orchestration:** LangGraph / LangChain[cite: 1]
 * **LLM & Embeddings:** OpenAI (`text-embedding-3-small`, `gpt-4o-mini` / `gpt-4o`)
 * **Vector Database:** Pinecone / FAISS
 * **Language:** Python 3.10+
+* **Deployment:** AWS Cloud deployment, Automated CI/CD
+
+---
+
+### AI / LLM
+
+* Python
+* LangChain
+* LangGraph
+* OpenAI
+* Structured LLM outputs
+* Prompt engineering
+
+### Retrieval
+
+* Vector embeddings
+* Pinecone
+* Semantic search
+* Retrieval evaluation
+* Query optimization
+* Query rewriting
+
+### External Tools
+
+* Tavily
+* MCP
+* Async tool execution
+
+### Backend
+
+* Python
+* SQLAlchemy
+* SQLite
+* Repository pattern
+* Service layer
+
+### Frontend
+
+* Streamlit
+* Stateful UI
+* Streaming pipeline events
+* Project / chat management
+
+### Engineering
+
+* Docker
+* Git
+* Logging
+* Exception handling
+* Modular architecture
+* Async programming
+
+---
+
+## 🧩 LangGraph Workflow
+
+The application is implemented as a stateful LangGraph workflow.
+
+Important nodes include:
+
+| Node                    | Responsibility                       |
+| ----------------------- | ------------------------------------ |
+| `decide_route`          | Determines RAG / Tool / Direct route |
+| `check_semantic_cache`  | Searches previous semantic answers   |
+| `optimizer`             | Improves retrieval query             |
+| `retrieve`              | Retrieves relevant documents         |
+| `check_retrieval_score` | Evaluates retrieval quality          |
+| `generate_direct`       | Generates direct LLM answer          |
+| `web search tools`      | Uses external tools/web search       |
+| `evaluate_answer`       | Evaluates generated answer           |
+| `rewrite_question`      | Rewrites poor questions              |
+| `revise_answer`         | Corrects weak answers                |
+
+The workflow is designed as a **state machine rather than a fixed linear chain**, allowing the system to make decisions dynamically.
+
+---
+
+## 📊 Evaluation
+
+The system evaluates generated answers using multiple quality signals.
+
+### Groundedness
+
+Measures whether the answer is supported by retrieved context.
+
+### Hallucination
+
+Detects unsupported or fabricated information.
+
+### Sycophancy
+
+Checks whether the model unnecessarily agrees with the user instead of following evidence.
+
+### Overall Evaluation
+
+A combined score can be used to decide whether an answer should be accepted or corrected.
+
+Example conceptual scoring:
+
+```text
+Final Score =
+    0.4 × Groundedness
+  + 0.4 × (1 - Hallucination)
+  + 0.2 × (1 - Sycophancy)
+```
+
+---
 
 ## 🚀 Quick Start
 
@@ -129,7 +283,7 @@ cd self-corrective-rag-langgraph
 
 pip install -r requirements.txt
 
-## .env
+## .env & Setup github secrets
 
 PINECONE_API_KEY = ""
 OPENAI_API_KEY = "sk-proj-----"
@@ -144,26 +298,15 @@ ECR_REPOSITORY_NAME = ''
 AWS_REGION = "us-east-1"
 AWS_DEFAULT_REGION = "us-east-1"
 BUCKET_NAME = ""
+
 ```
 
+## ▶️ Run the Application
 
-## .env
+Start the Streamlit application:
 
-``` bash
-
-| Secret Name           | Example Value            |
-| --------------------- | ------------------------ |
-| AWS_ACCESS_KEY_ID     | AKIA...                  |
-| AWS_SECRET_ACCESS_KEY | xxxxxxxxx                |
-| AWS_DEFAULT_REGION    | eu-central-1             |
-| ECR_REPO              | your-ecr-repository-name |
-| PINECONE_API_KEY      | your-pinecone-key        |
-| OPENAI_API_KEY        | your-openai-key          |
-
-
-export AWS_ACCESS_KEY_ID = "YOUR_ACCESS_KEY_ID"
-export AWS_SECRET_ACCESS_KEY = "YOUR_SECRET_ACCESS_KEY"
-
+```bash
+streamlit run app.py
 ```
 
 ## AWS-CICD-Deployment-with-Github-Actions
@@ -199,7 +342,7 @@ export AWS_SECRET_ACCESS_KEY = "YOUR_SECRET_ACCESS_KEY"
 
 ### 3. Create ECR repo to store/save docker image
 
-- Save the URI: 520551197421.dkr.ecr.us-east-1.amazonaws.com/self-rag
+* Save the URI: 520551197421.dkr.ecr.us-east-1.amazonaws.com/self-rag
 
 ### 4. Create EC2 machine (Ubuntu)
 
@@ -224,19 +367,3 @@ sudo usermod -aG docker ubuntu
 newgrp docker
 
 ```
-
-### 6. Setup github secrets
-
-```bash
-
-AWS_ACCESS_KEY_ID =
-
-AWS_SECRET_ACCESS_KEY =
-
-AWS_REGION = us-east-1
-
-AWS_ECR_LOGIN_URI = ''
-
-ECR_REPOSITORY_NAME = Rag-AI
-```
-
