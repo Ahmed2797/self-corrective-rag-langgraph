@@ -18,7 +18,7 @@ jobs:
 
   # ==========================================================
   # CONTINUOUS INTEGRATION
-  # BUILD + PUSH DOCKER IMAGE TO ECR
+  # BUILD + PUSH IMAGE TO ECR
   # ==========================================================
 
   Continuous-Integration:
@@ -46,27 +46,28 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       # --------------------------------------------------------
-      # Validate AWS / ECR Configuration
+      # Validate ECR Configuration
       # --------------------------------------------------------
 
       - name: Validate ECR Configuration
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+
         run: |
           set -e
 
           echo "======================================"
-          echo "Validating configuration"
+          echo "Validating AWS/ECR configuration"
           echo "======================================"
-
-          if [ -z "$ECR_REPOSITORY" ]; then
-            echo "ERROR: ECR_REPO secret is empty."
-            exit 1
-          fi
 
           if [ -z "$AWS_REGION" ]; then
             echo "ERROR: AWS_REGION secret is empty."
+            exit 1
+          fi
+
+          if [ -z "$ECR_REPOSITORY" ]; then
+            echo "ERROR: ECR_REPO secret is empty."
             exit 1
           fi
 
@@ -74,7 +75,7 @@ jobs:
           echo "ECR Repository: $ECR_REPOSITORY"
 
       # --------------------------------------------------------
-      # Login to Amazon ECR
+      # Login to ECR
       # --------------------------------------------------------
 
       - name: Login to Amazon ECR
@@ -112,14 +113,11 @@ jobs:
             -t "$LATEST_URI" \
             .
 
-          echo "======================================"
-          echo "Docker image built successfully"
-          echo "======================================"
-
-          docker images | grep "$ECR_REPOSITORY"
+          echo ""
+          echo "Docker image built successfully."
 
       # --------------------------------------------------------
-      # Push Commit SHA Image
+      # Push Versioned Image
       # --------------------------------------------------------
 
       - name: Push Versioned Docker Image
@@ -167,9 +165,10 @@ jobs:
 
           echo "Latest image pushed successfully."
 
+
   # ==========================================================
   # CONTINUOUS DEPLOYMENT
-  # DEPLOY TO EC2 SELF-HOSTED RUNNER
+  # DEPLOY TO EC2
   # ==========================================================
 
   Continuous-Deployment:
@@ -180,10 +179,10 @@ jobs:
     steps:
 
       # --------------------------------------------------------
-      # Validate EC2 Docker Environment
+      # Check EC2 Environment
       # --------------------------------------------------------
 
-      - name: Validate EC2 Environment
+      - name: Check EC2 Environment
         run: |
           set -e
 
@@ -191,12 +190,9 @@ jobs:
           echo "EC2 Environment"
           echo "======================================"
 
+          echo ""
           echo "Docker version:"
           docker --version
-
-          echo ""
-          echo "Docker Compose version:"
-          docker compose version || true
 
           echo ""
           echo "Disk usage:"
@@ -222,7 +218,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       # --------------------------------------------------------
-      # Login to Amazon ECR
+      # Login to ECR
       # --------------------------------------------------------
 
       - name: Login to Amazon ECR
@@ -243,7 +239,7 @@ jobs:
           set -e
 
           echo "======================================"
-          echo "Deployment Configuration"
+          echo "Validating deployment configuration"
           echo "======================================"
 
           if [ -z "$ECR_REGISTRY" ]; then
@@ -257,7 +253,7 @@ jobs:
           fi
 
           if [ -z "$IMAGE_TAG" ]; then
-            echo "ERROR: Image tag is empty."
+            echo "ERROR: IMAGE_TAG is empty."
             exit 1
           fi
 
@@ -265,8 +261,47 @@ jobs:
 
           echo "Registry:   $ECR_REGISTRY"
           echo "Repository: $ECR_REPOSITORY"
-          echo "Tag:        $IMAGE_TAG"
+          echo "Image Tag:  $IMAGE_TAG"
           echo "Image URI:  $IMAGE_URI"
+
+
+      # ======================================================
+      # IMPORTANT:
+      # CLEAN DOCKER STORAGE BEFORE PULL
+      # ======================================================
+
+      - name: Cleanup Docker Storage Before Pull
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Docker storage BEFORE cleanup"
+          echo "======================================"
+
+          df -h
+
+          echo ""
+          docker system df
+
+          echo ""
+          echo "Removing stopped containers..."
+
+          docker container prune -f || true
+
+          echo ""
+          echo "Removing unused Docker images..."
+
+          docker image prune -af || true
+
+          echo ""
+          echo "Docker storage AFTER cleanup"
+          echo "======================================"
+
+          df -h
+
+          echo ""
+          docker system df
+
 
       # --------------------------------------------------------
       # Pull New Docker Image
@@ -287,16 +322,11 @@ jobs:
           echo "Pulling Docker image"
           echo "======================================"
 
-          echo "Image:"
-          echo "$IMAGE_URI"
+          echo "Image: $IMAGE_URI"
 
           echo ""
           echo "Disk before pull:"
           df -h
-
-          echo ""
-          echo "Docker disk usage before pull:"
-          docker system df
 
           echo ""
           echo "Starting docker pull..."
@@ -310,30 +340,39 @@ jobs:
 
           docker image inspect "$IMAGE_URI" > /dev/null
 
-          echo "Image verification successful."
+          echo "Docker image verified successfully."
+
 
       # --------------------------------------------------------
-      # Stop Existing Container
+      # Remove Old Container
       # --------------------------------------------------------
 
-      - name: Stop Existing Container
+      - name: Remove Old Container
         run: |
           set -e
 
           echo "======================================"
-          echo "Stopping existing container"
+          echo "Removing old container"
           echo "======================================"
 
           if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-            echo "Existing container found: $CONTAINER_NAME"
+
+            echo "Existing container found:"
+            echo "$CONTAINER_NAME"
+
             docker rm -f "$CONTAINER_NAME"
+
             echo "Old container removed."
+
           else
+
             echo "No existing container found."
+
           fi
 
+
       # --------------------------------------------------------
-      # Run New Docker Container
+      # Run New Container
       # --------------------------------------------------------
 
       - name: Run New Docker Container
@@ -364,7 +403,7 @@ jobs:
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
           echo "======================================"
-          echo "Starting new container"
+          echo "Starting new Docker container"
           echo "======================================"
 
           echo "Container: $CONTAINER_NAME"
@@ -398,8 +437,9 @@ jobs:
 
           docker ps -a --filter "name=$CONTAINER_NAME"
 
+
       # --------------------------------------------------------
-      # Verify Container Is Running
+      # Verify Container
       # --------------------------------------------------------
 
       - name: Verify Container
@@ -413,6 +453,7 @@ jobs:
           sleep 3
 
           if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+
             echo "ERROR: Container is not running."
 
             echo ""
@@ -424,9 +465,11 @@ jobs:
             docker logs "$CONTAINER_NAME" || true
 
             exit 1
+
           fi
 
-          echo "Container is running successfully."
+          echo "Container is running."
+
 
       # --------------------------------------------------------
       # Streamlit Health Check
@@ -435,7 +478,7 @@ jobs:
       - name: Health Check
         run: |
           echo "======================================"
-          echo "Waiting for Streamlit application"
+          echo "Streamlit Health Check"
           echo "======================================"
 
           for i in {1..24}; do
@@ -457,11 +500,13 @@ jobs:
               echo "======================================"
 
               exit 0
+
             fi
 
             echo "Application is not ready yet."
 
             if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+
               echo ""
               echo "ERROR: Container stopped unexpectedly."
 
@@ -474,6 +519,7 @@ jobs:
               docker logs "$CONTAINER_NAME" || true
 
               exit 1
+
             fi
 
             sleep 5
@@ -495,15 +541,16 @@ jobs:
 
           exit 1
 
+
       # --------------------------------------------------------
-      # Show Container Status
+      # Show Final Container Status
       # --------------------------------------------------------
 
       - name: Show Container Status
         if: always()
         run: |
           echo "======================================"
-          echo "Container Status"
+          echo "Final Container Status"
           echo "======================================"
 
           docker ps -a \
@@ -516,19 +563,24 @@ jobs:
 
           docker logs --tail 100 "$CONTAINER_NAME" || true
 
+
       # --------------------------------------------------------
-      # Cleanup Unused Docker Images
+      # Final Docker Cleanup
       # --------------------------------------------------------
 
       - name: Cleanup Docker Images
         if: success()
         run: |
           echo "======================================"
-          echo "Cleaning unused Docker images"
+          echo "Final Docker Cleanup"
           echo "======================================"
 
-          docker image prune -af
+          docker image prune -af || true
 
           echo ""
-          echo "Docker disk usage after cleanup:"
+          echo "Docker disk usage:"
           docker system df
+
+          echo ""
+          echo "Disk usage:"
+          df -h
