@@ -142,28 +142,6 @@ jobs:
       # --------------------------------------------------------
       # Run New Container
       # --------------------------------------------------------
-
-      - name: Run New Docker Container
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
-          IMAGE_TAG: ${{ github.sha }}
-
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
-          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
-          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
-
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-
-          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
-          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
-          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
-
-        run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
       - name: Run New Docker Container
         env:
           HOST_PORT: 8501
@@ -178,8 +156,14 @@ jobs:
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
           LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
-
+        
         run: |
+          set -e
+
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
           echo "Starting container..."
           echo "Image: $IMAGE_URI"
           echo "Port: $HOST_PORT:$CONTAINER_PORT"
@@ -190,18 +174,21 @@ jobs:
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
             -p "$HOST_PORT:$CONTAINER_PORT" \
-            -v self_rag_data:/app/data \
-            -v self_rag_uploads:/app/uploads \
-            -v self_rag_faiss:/app/faiss_index_projects \
+            -v agentic_chatbot_data:/app/data \
+            -v agentic_chatbot_uploads:/app/uploads \
+            -v agentic_chatbot_faiss:/app/faiss_index_projects \
             -e OPENAI_API_KEY="$OPENAI_API_KEY" \
             -e PINECONE_API_KEY="$PINECONE_API_KEY" \
-            -e PINECONE_NAMESPACE="$PINECONE_NAMESPACE" \
+            -e PINECONE_INDEX_NAME="$PINECONE_INDEX_NAME" \
             -e TAVILY_API_KEY="$TAVILY_API_KEY" \
             -e LANGSMITH_TRACING="$LANGSMITH_TRACING" \
             -e LANGSMITH_API_KEY="$LANGSMITH_API_KEY" \
             -e LANGSMITH_ENDPOINT="$LANGSMITH_ENDPOINT" \
             -e LANGSMITH_PROJECT="$LANGSMITH_PROJECT" \
             "$IMAGE_URI"
+
+          echo "Container started."
+          docker ps
 
       # --------------------------------------------------------
       # Wait for Streamlit
