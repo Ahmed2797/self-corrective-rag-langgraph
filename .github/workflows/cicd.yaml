@@ -5,11 +5,20 @@ on:
     branches:
       - main
 
+# ==========================================================
+# GLOBAL ENVIRONMENT
+# ==========================================================
+
+env:
+  CONTAINER_NAME: self-rag
+  HOST_PORT: 8501
+  CONTAINER_PORT: 8501
 
 jobs:
 
   # ==========================================================
-  # CONTINUOUS INTEGRATION + BUILD + PUSH
+  # CONTINUOUS INTEGRATION
+  # BUILD + PUSH DOCKER IMAGE TO ECR
   # ==========================================================
 
   Continuous-Integration:
@@ -17,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
 
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -33,7 +46,35 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       # --------------------------------------------------------
-      # Login to ECR
+      # Validate AWS / ECR Configuration
+      # --------------------------------------------------------
+
+      - name: Validate ECR Configuration
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Validating configuration"
+          echo "======================================"
+
+          if [ -z "$ECR_REPOSITORY" ]; then
+            echo "ERROR: ECR_REPO secret is empty."
+            exit 1
+          fi
+
+          if [ -z "$AWS_REGION" ]; then
+            echo "ERROR: AWS_REGION secret is empty."
+            exit 1
+          fi
+
+          echo "AWS Region: $AWS_REGION"
+          echo "ECR Repository: $ECR_REPOSITORY"
+
+      # --------------------------------------------------------
+      # Login to Amazon ECR
       # --------------------------------------------------------
 
       - name: Login to Amazon ECR
@@ -49,54 +90,125 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
-        run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Building Docker image:"
-          echo "$IMAGE_URI"
+        run: |
+          set -e
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          LATEST_URI="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+          echo "======================================"
+          echo "Building Docker image"
+          echo "======================================"
+
+          echo "Registry:   $ECR_REGISTRY"
+          echo "Repository: $ECR_REPOSITORY"
+          echo "Tag:        $IMAGE_TAG"
+          echo "Image:      $IMAGE_URI"
 
           docker build \
+            --pull \
             -t "$IMAGE_URI" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "$LATEST_URI" \
             .
 
+          echo "======================================"
+          echo "Docker image built successfully"
+          echo "======================================"
+
+          docker images | grep "$ECR_REPOSITORY"
+
       # --------------------------------------------------------
-      # Push Docker Image
+      # Push Commit SHA Image
       # --------------------------------------------------------
 
-      - name: Push Docker Image
+      - name: Push Versioned Docker Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
+
         run: |
+          set -e
+
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Pushing:"
-          echo "$IMAGE_URI"
+          echo "======================================"
+          echo "Pushing versioned image"
+          echo "======================================"
+
+          echo "Image: $IMAGE_URI"
 
           docker push "$IMAGE_URI"
 
-          echo "Pushing latest tag..."
+          echo "Versioned image pushed successfully."
 
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+      # --------------------------------------------------------
+      # Push Latest Image
+      # --------------------------------------------------------
 
+      - name: Push Latest Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+
+        run: |
+          set -e
+
+          LATEST_URI="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+          echo "======================================"
+          echo "Pushing latest image"
+          echo "======================================"
+
+          echo "Image: $LATEST_URI"
+
+          docker push "$LATEST_URI"
+
+          echo "Latest image pushed successfully."
 
   # ==========================================================
   # CONTINUOUS DEPLOYMENT
+  # DEPLOY TO EC2 SELF-HOSTED RUNNER
   # ==========================================================
 
   Continuous-Deployment:
     name: Deploy to EC2
     needs: Continuous-Integration
     runs-on: self-hosted
-    env:
-      ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
-      IMAGE_TAG: ${{ github.sha }}
-      CONTAINER_NAME: self-rag
 
     steps:
+
+      # --------------------------------------------------------
+      # Validate EC2 Docker Environment
+      # --------------------------------------------------------
+
+      - name: Validate EC2 Environment
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "EC2 Environment"
+          echo "======================================"
+
+          echo "Docker version:"
+          docker --version
+
+          echo ""
+          echo "Docker Compose version:"
+          docker compose version || true
+
+          echo ""
+          echo "Disk usage:"
+          df -h
+
+          echo ""
+          echo "Memory:"
+          free -h
+
+          echo ""
+          echo "Docker disk usage:"
+          docker system df
 
       # --------------------------------------------------------
       # Configure AWS
@@ -110,12 +222,51 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       # --------------------------------------------------------
-      # Login to ECR
+      # Login to Amazon ECR
       # --------------------------------------------------------
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+
+      # --------------------------------------------------------
+      # Validate Deployment Configuration
+      # --------------------------------------------------------
+
+      - name: Validate Deployment Configuration
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          IMAGE_TAG: ${{ github.sha }}
+
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Deployment Configuration"
+          echo "======================================"
+
+          if [ -z "$ECR_REGISTRY" ]; then
+            echo "ERROR: ECR registry is empty."
+            exit 1
+          fi
+
+          if [ -z "$ECR_REPOSITORY" ]; then
+            echo "ERROR: ECR repository is empty."
+            exit 1
+          fi
+
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "ERROR: Image tag is empty."
+            exit 1
+          fi
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Registry:   $ECR_REGISTRY"
+          echo "Repository: $ECR_REPOSITORY"
+          echo "Tag:        $IMAGE_TAG"
+          echo "Image URI:  $IMAGE_URI"
 
       # --------------------------------------------------------
       # Pull New Docker Image
@@ -126,51 +277,99 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: ${{ github.sha }}
-        run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Pulling Docker image:"
-          echo "$IMAGE_URI"
-
-          docker pull "$IMAGE_URI"
-
-      # --------------------------------------------------------
-      # Stop Old Container
-      # --------------------------------------------------------
-
-      - name: Stop Old Container
-        run: |
-          docker stop "$CONTAINER_NAME" || true
-          docker rm "$CONTAINER_NAME" || true
-
-      # --------------------------------------------------------
-      # Run New Container
-      # --------------------------------------------------------
-      - name: Run New Docker Container
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          HOST_PORT: 8501
-          CONTAINER_PORT: 8501
-
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
-          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
-          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
-          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
-        
         run: |
           set -e
 
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Starting container..."
-          echo "Image: $IMAGE_URI"
-          echo "Port: $HOST_PORT:$CONTAINER_PORT"
+          echo "======================================"
+          echo "Pulling Docker image"
+          echo "======================================"
 
-          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          echo "Image:"
+          echo "$IMAGE_URI"
+
+          echo ""
+          echo "Disk before pull:"
+          df -h
+
+          echo ""
+          echo "Docker disk usage before pull:"
+          docker system df
+
+          echo ""
+          echo "Starting docker pull..."
+
+          docker pull "$IMAGE_URI"
+
+          echo ""
+          echo "======================================"
+          echo "Docker image pulled successfully"
+          echo "======================================"
+
+          docker image inspect "$IMAGE_URI" > /dev/null
+
+          echo "Image verification successful."
+
+      # --------------------------------------------------------
+      # Stop Existing Container
+      # --------------------------------------------------------
+
+      - name: Stop Existing Container
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Stopping existing container"
+          echo "======================================"
+
+          if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+            echo "Existing container found: $CONTAINER_NAME"
+            docker rm -f "$CONTAINER_NAME"
+            echo "Old container removed."
+          else
+            echo "No existing container found."
+          fi
+
+      # --------------------------------------------------------
+      # Run New Docker Container
+      # --------------------------------------------------------
+
+      - name: Run New Docker Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+          IMAGE_TAG: ${{ github.sha }}
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+
+          # EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+          # EMBEDDING_DIMENSION: ${{ secrets.EMBEDDING_DIMENSION }}
+
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
+
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
+          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
+
+        run: |
+          set -e
+
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "======================================"
+          echo "Starting new container"
+          echo "======================================"
+
+          echo "Container: $CONTAINER_NAME"
+          echo "Image:     $IMAGE_URI"
+          echo "Port:      $HOST_PORT:$CONTAINER_PORT"
 
           docker run -d \
             --name "$CONTAINER_NAME" \
@@ -180,6 +379,9 @@ jobs:
             -v agentic_chatbot_uploads:/app/uploads \
             -v agentic_chatbot_faiss:/app/faiss_index_projects \
             -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+            -e OPENAI_MODEL="$OPENAI_MODEL" \
+            # -e EMBEDDING_MODEL="$EMBEDDING_MODEL" \
+            # -e EMBEDDING_DIMENSION="$EMBEDDING_DIMENSION" \
             -e PINECONE_API_KEY="$PINECONE_API_KEY" \
             -e PINECONE_INDEX_NAME="$PINECONE_INDEX_NAME" \
             -e TAVILY_API_KEY="$TAVILY_API_KEY" \
@@ -189,25 +391,67 @@ jobs:
             -e LANGSMITH_PROJECT="$LANGSMITH_PROJECT" \
             "$IMAGE_URI"
 
-          echo "Container started."
-          docker ps
+          echo ""
+          echo "======================================"
+          echo "Container started"
+          echo "======================================"
+
+          docker ps -a --filter "name=$CONTAINER_NAME"
 
       # --------------------------------------------------------
-      # Wait for Streamlit
+      # Verify Container Is Running
+      # --------------------------------------------------------
+
+      - name: Verify Container
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Verifying container"
+          echo "======================================"
+
+          sleep 3
+
+          if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+            echo "ERROR: Container is not running."
+
+            echo ""
+            echo "Container status:"
+            docker ps -a --filter "name=$CONTAINER_NAME"
+
+            echo ""
+            echo "Container logs:"
+            docker logs "$CONTAINER_NAME" || true
+
+            exit 1
+          fi
+
+          echo "Container is running successfully."
+
+      # --------------------------------------------------------
+      # Streamlit Health Check
       # --------------------------------------------------------
 
       - name: Health Check
         run: |
-          echo "Waiting for Streamlit application..."
+          echo "======================================"
+          echo "Waiting for Streamlit application"
+          echo "======================================"
 
-          for i in {1..12}; do
+          for i in {1..24}; do
+
+            echo ""
+            echo "Health check attempt: $i/24"
 
             if curl \
               --fail \
               --silent \
-              http://localhost:8501/_stcore/health \
+              --show-error \
+              --max-time 5 \
+              http://127.0.0.1:8501/_stcore/health \
               > /dev/null; then
 
+              echo ""
               echo "======================================"
               echo "Streamlit application is healthy."
               echo "======================================"
@@ -215,22 +459,39 @@ jobs:
               exit 0
             fi
 
-            echo "Application is not ready yet..."
-            echo "Attempt: $i/12"
+            echo "Application is not ready yet."
+
+            if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+              echo ""
+              echo "ERROR: Container stopped unexpectedly."
+
+              echo ""
+              echo "Container status:"
+              docker ps -a --filter "name=$CONTAINER_NAME"
+
+              echo ""
+              echo "Container logs:"
+              docker logs "$CONTAINER_NAME" || true
+
+              exit 1
+            fi
 
             sleep 5
 
           done
 
+          echo ""
           echo "======================================"
-          echo "Application failed health check."
+          echo "Application failed health check"
           echo "======================================"
 
+          echo ""
           echo "Container status:"
           docker ps -a --filter "name=$CONTAINER_NAME"
 
+          echo ""
           echo "Container logs:"
-          docker logs "$CONTAINER_NAME"
+          docker logs --tail 200 "$CONTAINER_NAME" || true
 
           exit 1
 
@@ -239,14 +500,35 @@ jobs:
       # --------------------------------------------------------
 
       - name: Show Container Status
+        if: always()
         run: |
-          docker ps \
+          echo "======================================"
+          echo "Container Status"
+          echo "======================================"
+
+          docker ps -a \
             --filter "name=$CONTAINER_NAME"
 
+          echo ""
+          echo "======================================"
+          echo "Recent Container Logs"
+          echo "======================================"
+
+          docker logs --tail 100 "$CONTAINER_NAME" || true
+
       # --------------------------------------------------------
-      # Cleanup Old Docker Images
+      # Cleanup Unused Docker Images
       # --------------------------------------------------------
 
       - name: Cleanup Docker Images
+        if: success()
         run: |
+          echo "======================================"
+          echo "Cleaning unused Docker images"
+          echo "======================================"
+
           docker image prune -af
+
+          echo ""
+          echo "Docker disk usage after cleanup:"
+          docker system df
