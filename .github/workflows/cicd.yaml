@@ -164,20 +164,37 @@ jobs:
         run: |
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
+      - name: Run New Docker Container
+        env:
+          HOST_PORT: 8501
+          CONTAINER_PORT: 8501
+          CONTAINER_NAME: self-rag
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT }}
+          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
+
+        run: |
           echo "Starting container..."
           echo "Image: $IMAGE_URI"
+          echo "Port: $HOST_PORT:$CONTAINER_PORT"
+
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
           docker run -d \
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
             -p "$HOST_PORT:$CONTAINER_PORT" \
-            -v agentic_chatbot_data:/app/data \
-            -v agentic_chatbot_uploads:/app/uploads \
-            -v agentic_chatbot_faiss:/app/faiss_index_projects \
+            -v self_rag_data:/app/data \
+            -v self_rag_uploads:/app/uploads \
+            -v self_rag_faiss:/app/faiss_index_projects \
             -e OPENAI_API_KEY="$OPENAI_API_KEY" \
-            -e OPENAI_MODEL="$OPENAI_MODEL" \
             -e PINECONE_API_KEY="$PINECONE_API_KEY" \
-            -e PINECONE_INDEX_NAME="$PINECONE_INDEX_NAME" \
             -e PINECONE_NAMESPACE="$PINECONE_NAMESPACE" \
             -e TAVILY_API_KEY="$TAVILY_API_KEY" \
             -e LANGSMITH_TRACING="$LANGSMITH_TRACING" \
