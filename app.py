@@ -1,16 +1,23 @@
-"""
-Main Application Entrypoint (Streamlit)
-=======================================
-Multi-project, multi-chat RAG workspace.
-Upload PDF/TXT/MD -> index per project -> ask questions -> see answers.
-"""
-
 import hashlib
 import os
 import shutil
 import sys
+import logging
+from pathlib import Path
+from contextlib import contextmanager
+from typing import Optional, Dict, Any
+import traceback
 
 import streamlit as st
+
+# =====================================================
+# LOGGING SETUP
+# =====================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,7 +28,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from src.database.db import init_db, SessionLocal
+from src.database.db import init_db, SessionLocal, engine
 from src.database.repository import (
     ProjectRepository,
     ChatRepository,
@@ -37,61 +44,172 @@ from frontend.components import (
     render_project_summary,
 )
 
-UPLOAD_ROOT = os.path.join(os.getcwd(), "uploads")
+
+UPLOAD_ROOT = Path(os.getenv("RAG_UPLOAD_ROOT", "./uploads")).resolve()
+MAX_FILE_SIZE_MB = int(os.getenv("RAG_MAX_FILE_SIZE_MB", "100"))
+MAX_FILES_PER_UPLOAD = int(os.getenv("RAG_MAX_FILES_PER_UPLOAD", "10"))
+
+# Create directories
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+logger.info(f"Upload root: {UPLOAD_ROOT}")
+logger.info(f"Max file size: {MAX_FILE_SIZE_MB}MB")
 
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
+
+@contextmanager
+def get_db_session():
+    """Context manager for database sessions"""
+    session = SessionLocal()
+    try:
+        yield session
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+class GraphCacheManager:
+    """Manages graph caching with version tracking"""
+    
+    def __init__(self):
+        self.cache = {}
+        self.versions = {}
+    
+    def get_version_key(self, project_id: str) -> str:
+        """Get unique key that changes when files are updated"""
+        key = f"graph_{project_id}"
+        if key not in self.versions:
+            self.versions[key] = 0
+        return f"{key}_v{self.versions[key]}"
+    
+    def get(self, project_id: str):
+        """Get cached graph if exists"""
+        key = self.get_version_key(project_id)
+        return self.cache.get(key)
+    
+    def set(self, project_id: str, graph):
+        """Cache graph with current version"""
+        key = self.get_version_key(project_id)
+        self.cache[key] = graph
+    
+    def invalidate(self, project_id: str):
+        """Invalidate cache for project (when files change)"""
+        self.versions[f"graph_{project_id}"] = self.versions.get(f"graph_{project_id}", 0) + 1
+        logger.info(f"Invalidated graph cache for project {project_id}")
+
+
+graph_cache_manager = GraphCacheManager()
+
+
 @st.cache_resource(show_spinner="Loading RAG pipeline...")
-def load_graph(project_id: str):
-    """Compile the LangGraph pipeline once per project."""
-    from src.pipeline import pipeline
+def load_graph(project_id: str, cache_version: int):
+    """Compile the LangGraph pipeline once per project (with version tracking)"""
+    try:
+        logger.info(f"Loading graph for project {project_id} (v{cache_version})")
+        from src.pipeline import pipeline
+        graph = pipeline(project_id)
+        graph_cache_manager.set(project_id, graph)
+        logger.info(f"Graph loaded successfully for {project_id}")
+        return graph
+    except Exception as e:
+        logger.error(f"Failed to load graph: {e}")
+        st.error(f"Failed to load RAG pipeline: {e}")
+        raise
 
-    return pipeline(project_id)
+
+def safe_index_files(project_id: str, file_paths: list) -> Optional[int]:
+    """Safe file indexing with error recovery"""
+    try:
+        n_chunks = index_files(project_id, file_paths)
+        return n_chunks
+    except Exception as e:
+        logger.error(f"Indexing error for {file_paths}: {e}")
+        # Try to recover by invalidating cache
+        graph_cache_manager.invalidate(project_id)
+        raise
+
+
+def validate_uploaded_file(u_file) -> tuple[bool, str]:
+    """Validate uploaded file"""
+    # Check size
+    if u_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        return False, f"File too large (max {MAX_FILE_SIZE_MB}MB)"
+    
+    # Check extension
+    allowed = {"pdf", "txt", "md"}
+    ext = u_file.name.rsplit(".", 1)[-1].lower() if "." in u_file.name else ""
+    if ext not in allowed:
+        return False, f"File type not allowed (use: {', '.join(allowed)})"
+    
+    # Check if readable
+    try:
+        u_file.seek(0)
+        _ = u_file.read(100)  # Try to read first 100 bytes
+        u_file.seek(0)
+    except Exception as e:
+        return False, f"File is not readable: {e}"
+    
+    return True, ""
 
 
 def bytes_hash(data: bytes) -> str:
+    """Hash file content"""
     return hashlib.sha256(data).hexdigest()
 
 
-def file_hash_on_disk(path: str):
-    if not os.path.exists(path):
+def file_hash_on_disk(path: str) -> Optional[str]:
+    """Get hash of file on disk"""
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            return bytes_hash(f.read())
+    except Exception as e:
+        logger.warning(f"Could not hash file {path}: {e}")
         return None
-    with open(path, "rb") as f:
-        return bytes_hash(f.read())
 
 
-def rerun():
-    st.rerun()
-
-
-# ==============================================================================
+# =====================================================
 # SIDEBAR: PROJECTS & CHATS
-# ==============================================================================
+# =====================================================
 def render_sidebar(db):
+    """Render sidebar with projects and chats"""
     project_repo = ProjectRepository(db)
     chat_repo = ChatRepository(db)
 
     with st.sidebar:
         st.title("🤖 RAG Workspace")
 
-        # ---------------- Projects ----------------
+        # ---- Projects ----
         st.subheader("Projects")
-        projects = project_repo.get_all()
+        
+        try:
+            projects = project_repo.get_all()
+        except Exception as e:
+            logger.error(f"Failed to load projects: {e}")
+            st.error("Could not load projects from database")
+            projects = []
 
         with st.expander("➕ New Project"):
             name = st.text_input("Project Name", key="new_proj_name")
             desc = st.text_area("Description (Optional)", key="new_proj_desc")
             if st.button("Create Project", use_container_width=True):
-                if name.strip():
+                if not name.strip():
+                    st.warning("Please enter a project name")
+                    return
+                
+                try:
                     created = project_repo.create(name.strip(), desc.strip())
                     st.session_state.active_project_id = created.id
                     st.session_state.active_chat_id = None
                     st.toast(f"Project '{created.name}' created!", icon="✅")
-                    rerun()
-                else:
-                    st.warning("Please enter a project name.")
+                    st.rerun()
+                except Exception as e:
+                    logger.error(f"Failed to create project: {e}")
+                    st.error(f"Could not create project: {e}")
 
         if projects:
             options = {p.id: p.name for p in projects}
@@ -133,47 +251,74 @@ def render_sidebar(db):
                             use_container_width=True,
                         ):
                             if renamed.strip():
-                                project_repo.rename(active.id, renamed.strip())
-                                rerun()
+                                try:
+                                    project_repo.rename(active.id, renamed.strip())
+                                    st.rerun()
+                                except Exception as e:
+                                    logger.error(f"Failed to rename: {e}")
+                                    st.error(f"Could not rename project: {e}")
 
                         st.divider()
                         st.markdown("**Danger Zone**")
-                        st.caption(
-                            "Deleting a project removes its chats, files, and index data."
-                        )
+                        st.caption("Deleting a project removes its chats, files, and data.")
+                        
                         if st.button(
                             "🗑️ Delete Project",
                             key=f"delete_proj_{active.id}",
                             type="primary",
                             use_container_width=True,
                         ):
-                            project_repo.delete(active.id)
-                            shutil.rmtree(
-                                os.path.join(UPLOAD_ROOT, active.id), ignore_errors=True
-                            )
-                            delete_index(active.id)
-                            load_graph.clear()
-                            st.session_state.active_project_id = None
-                            st.session_state.active_chat_id = None
-                            st.toast(f"Project '{active.name}' deleted.", icon="🗑️")
-                            rerun()
+                            try:
+                                project_repo.delete(active.id)
+                                
+                                try:
+                                    delete_index(active.id)
+                                except Exception as e:
+                                    logger.error(f"Failed to delete index: {e}")
+                                    st.warning("Index cleanup incomplete (non-critical)")
+                                
+                                # Clean up files
+                                project_dir = UPLOAD_ROOT / active.id
+                                if project_dir.exists():
+                                    shutil.rmtree(project_dir, ignore_errors=True)
+                                
+                                # Invalidate cache
+                                graph_cache_manager.invalidate(active.id)
+                                
+                                st.session_state.active_project_id = None
+                                st.session_state.active_chat_id = None
+                                st.toast(f"Project '{active.name}' deleted.", icon="🗑️")
+                                st.rerun()
+                            except Exception as e:
+                                logger.error(f"Failed to delete project: {e}")
+                                st.error(f"Could not delete project: {e}")
         else:
             st.caption("No projects available. Create one to get started.")
 
         st.divider()
 
-        # ---------------- Chats ----------------
+        # ---- Chats ----
         if st.session_state.active_project_id:
             st.subheader("Chats")
 
             if st.button("➕ New Chat Thread", use_container_width=True):
-                new_chat = chat_repo.create(
-                    project_id=st.session_state.active_project_id
-                )
-                st.session_state.active_chat_id = new_chat.id
-                rerun()
+                try:
+                    new_chat = chat_repo.create(
+                        project_id=st.session_state.active_project_id
+                    )
+                    st.session_state.active_chat_id = new_chat.id
+                    st.rerun()
+                except Exception as e:
+                    logger.error(f"Failed to create chat: {e}")
+                    st.error(f"Could not create chat: {e}")
 
-            chats = chat_repo.get_by_project(st.session_state.active_project_id)
+            try:
+                chats = chat_repo.get_by_project(st.session_state.active_project_id)
+            except Exception as e:
+                logger.error(f"Failed to load chats: {e}")
+                st.error("Could not load chats")
+                chats = []
+
             if chats:
                 chat_ids = [c.id for c in chats]
                 if st.session_state.active_chat_id not in chat_ids:
@@ -190,7 +335,7 @@ def render_sidebar(db):
                             label, key=f"chat_btn_{c.id}", use_container_width=True
                         ):
                             st.session_state.active_chat_id = c.id
-                            rerun()
+                            st.rerun()
 
                     with col2:
                         with st.popover("⚙️", help="Chat Options"):
@@ -207,8 +352,12 @@ def render_sidebar(db):
                                 use_container_width=True,
                             ):
                                 if new_title.strip():
-                                    chat_repo.rename(c.id, new_title.strip())
-                                    rerun()
+                                    try:
+                                        chat_repo.rename(c.id, new_title.strip())
+                                        st.rerun()
+                                    except Exception as e:
+                                        logger.error(f"Failed to rename chat: {e}")
+                                        st.error(f"Could not rename: {e}")
 
                             st.divider()
                             st.markdown("**Delete Chat**")
@@ -218,18 +367,23 @@ def render_sidebar(db):
                                 type="primary",
                                 use_container_width=True,
                             ):
-                                chat_repo.delete(c.id)
-                                if st.session_state.active_chat_id == c.id:
-                                    st.session_state.active_chat_id = None
-                                rerun()
+                                try:
+                                    chat_repo.delete(c.id)
+                                    if st.session_state.active_chat_id == c.id:
+                                        st.session_state.active_chat_id = None
+                                    st.rerun()
+                                except Exception as e:
+                                    logger.error(f"Failed to delete chat: {e}")
+                                    st.error(f"Could not delete chat: {e}")
             else:
                 st.caption("No chat threads in this project.")
 
 
-# ==============================================================================
+# =====================================================
 # TAB 1: CHAT
-# ==============================================================================
+# =====================================================
 def render_chat_tab(db, graph_app, active_project, active_chat, doc_count):
+    """Render chat tab with streaming support"""
     message_repo = MessageRepository(db)
 
     if not active_chat:
@@ -237,22 +391,35 @@ def render_chat_tab(db, graph_app, active_project, active_chat, doc_count):
         return
 
     if graph_app is None:
-        st.error("RAG pipeline is unavailable. Check `src.pipeline` and the logs.")
+        st.error(
+            "RAG pipeline is unavailable. "
+            "Check that documents are indexed and try refreshing the page."
+        )
         return
 
     st.subheader(f"Thread: {active_chat.title}")
 
     if doc_count == 0:
         st.warning(
-            "This project has no documents yet. Upload some in the "
-            "**Document Management** tab so answers can use them."
+            "This project has no documents yet. "
+            "Upload some in the **Document Management** tab."
         )
 
-    for msg in message_repo.get_by_chat(active_chat.id):
+    try:
+        messages = message_repo.get_by_chat(active_chat.id)
+    except Exception as e:
+        logger.error(f"Failed to load messages: {e}")
+        st.error("Could not load chat history")
+        messages = []
+
+    for msg in messages:
         with st.chat_message(msg.role):
             st.markdown(msg.content)
             if msg.role == "assistant" and msg.metadata_dict:
-                render_message_metadata(msg.metadata_dict)
+                try:
+                    render_message_metadata(msg.metadata_dict)
+                except Exception as e:
+                    logger.warning(f"Could not render metadata: {e}")
 
     user_input = st.chat_input("Ask a question about your documents...")
     if not user_input:
@@ -265,67 +432,90 @@ def render_chat_tab(db, graph_app, active_project, active_chat, doc_count):
 
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
-        rag_service = RAGService(graph_app, db)
-        node_events = {}
-        pipeline_error = None
-
+        
         try:
+            rag_service = RAGService(graph_app, db)
+            node_events = {}
+            pipeline_error = None
+            final_result = None
+
             stream_gen = rag_service.run_stream(
                 chat_id=active_chat.id,
                 project_id=active_project.id,
                 user_question=user_input,
             )
 
-            final_result = None
-            while True:
-                try:
-                    event = next(stream_gen)
-                    node_events[event.node] = event.status
-                    if event.status == "failed":
-                        pipeline_error = event.error or "The RAG pipeline failed."
-                    with status_container.container():
+            for event in stream_gen:
+                node_events[event.node] = event.status
+                if event.status == "failed":
+                    pipeline_error = event.error or "Pipeline failed"
+                
+                with status_container.container():
+                    try:
                         render_pipeline_status(node_events)
-                except StopIteration as e:
-                    final_result = e.value
-                    break
+                    except Exception as e:
+                        logger.warning(f"Could not render pipeline status: {e}")
 
             status_container.empty()
+
+            # The generator should have returned the result via return/StopIteration
+            if hasattr(stream_gen, '__value__'):
+                final_result = stream_gen.__value__
+
             if final_result:
                 answer = str(final_result.get("answer") or "").strip()
                 if answer:
                     message_placeholder.markdown(answer)
+                    
+                    # Save message to DB
+                    try:
+                        message_repo.create(
+                            chat_id=active_chat.id,
+                            role="assistant",
+                            content=answer,
+                            metadata=final_result.get("metadata", {})
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to save message: {e}")
                 else:
                     message_placeholder.warning(
-                        "The pipeline finished without returning an answer. "
-                        "Check the application logs for details."
+                        "Pipeline finished but returned no answer. "
+                        "Check application logs."
                     )
+                
                 if final_result.get("metadata"):
-                    render_message_metadata(final_result["metadata"])
+                    try:
+                        render_message_metadata(final_result["metadata"])
+                    except Exception as e:
+                        logger.warning(f"Could not render metadata: {e}")
+            
             elif pipeline_error:
-                message_placeholder.error(f"Could not generate an answer: {pipeline_error}")
+                message_placeholder.error(f"Pipeline error: {pipeline_error}")
             else:
                 message_placeholder.error(
-                    "The pipeline stopped before producing an answer. "
-                    "Check the application logs for details."
+                    "Pipeline did not produce an answer. "
+                    "Check the application logs."
                 )
 
         except Exception as e:
             status_container.empty()
-            st.error(f"Error during graph execution: {e}")
+            logger.error(f"Error during execution: {e}\n{traceback.format_exc()}")
+            st.error(f"Error: {e}")
             return
 
-    rerun()
+    st.rerun()
 
 
-# ==============================================================================
-# TAB 2: DOCUMENTS (upload -> save -> index)
-# ==============================================================================
+# =====================================================
+# TAB 2: DOCUMENTS
+# =====================================================
 def render_files_tab(db, active_project):
+    """Render file upload and management tab"""
     file_repo = FileRepository(db)
 
     st.subheader("Project Documents")
 
-    # Version counter resets the uploader after a successful run
+    # Version counter resets uploader after successful run
     version_key = f"uploader_version_{active_project.id}"
     st.session_state.setdefault(version_key, 0)
 
@@ -336,11 +526,21 @@ def render_files_tab(db, active_project):
         key=f"file_uploader_{active_project.id}_{st.session_state[version_key]}",
     )
 
-    existing = file_repo.get_by_project(active_project.id)
+    if uploaded_files and len(uploaded_files) > MAX_FILES_PER_UPLOAD:
+        st.error(f"Max {MAX_FILES_PER_UPLOAD} files per upload")
+        uploaded_files = uploaded_files[:MAX_FILES_PER_UPLOAD]
+
+    try:
+        existing = file_repo.get_by_project(active_project.id)
+    except Exception as e:
+        logger.error(f"Failed to load files: {e}")
+        st.error("Could not load document list")
+        existing = []
+
     if existing:
         with st.expander(f"📚 {len(existing)} indexed document(s)", expanded=True):
             for f in existing:
-                st.write(f"• {f.display_name}")
+                st.write(f"• {f.display_name} ({f.size} bytes)")
     else:
         st.caption("No documents indexed yet.")
 
@@ -354,136 +554,173 @@ def render_files_tab(db, active_project):
     ):
         return
 
-    upload_dir = os.path.join(UPLOAD_ROOT, active_project.id)
-    os.makedirs(upload_dir, exist_ok=True)
+    upload_dir = UPLOAD_ROOT / active_project.id
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
     indexed, skipped, failed, empty = [], [], [], []
 
     with st.status("Processing documents...", expanded=True) as status:
         for u_file in uploaded_files:
+            is_valid, error_msg = validate_uploaded_file(u_file)
+            if not is_valid:
+                failed.append((u_file.name, error_msg))
+                st.write(f"❌ {u_file.name}: {error_msg}")
+                continue
+
             data = u_file.getvalue()
             safe_name = os.path.basename(u_file.name)
-            file_path = os.path.join(upload_dir, safe_name)
+            file_path = upload_dir / safe_name
 
-            # Same name + same content already indexed -> skip
-            if file_hash_on_disk(file_path) == bytes_hash(data):
+            # Check if already indexed
+            if file_hash_on_disk(str(file_path)) == bytes_hash(data):
                 skipped.append(safe_name)
                 st.write(f"⏭️ {safe_name}: already indexed")
                 continue
 
             st.write(f"⏳ {safe_name}: extracting, chunking, embedding...")
-            with open(file_path, "wb") as f:
-                f.write(data)
-
+            
             try:
-                n_chunks = index_files(active_project.id, [file_path])
+                with open(file_path, "wb") as f:
+                    f.write(data)
+
+                n_chunks = safe_index_files(active_project.id, [str(file_path)])
+                
+                if n_chunks == 0:
+                    file_path.unlink()
+                    empty.append(safe_name)
+                    st.write(f"⚠️ {safe_name}: no text found")
+                    continue
+
+                # Save to DB only after indexing succeeded
+                try:
+                    file_repo.create(
+                        project_id=active_project.id,
+                        original_name=u_file.name,
+                        display_name=u_file.name,
+                        storage_path=str(file_path),
+                        file_type=u_file.type or safe_name.rsplit(".", 1)[-1],
+                        size=u_file.size,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save file record: {e}")
+                    st.write(f"⚠️ {safe_name}: indexed but DB record failed")
+                    continue
+
+                indexed.append(safe_name)
+                st.write(f"✅ {safe_name}: {n_chunks} chunks indexed")
+                
             except Exception as e:
-                os.remove(file_path)  # so a retry isn't treated as a duplicate
-                failed.append(safe_name)
+                logger.error(f"Failed to index {safe_name}: {e}")
+                if file_path.exists():
+                    file_path.unlink()
+                failed.append((safe_name, str(e)))
                 st.write(f"❌ {safe_name}: {e}")
                 continue
-
-            if n_chunks == 0:
-                os.remove(file_path)
-                empty.append(safe_name)
-                st.write(f"⚠️ {safe_name}: no text found (scanned PDF?)")
-                continue
-
-            # DB record only after indexing succeeded
-            file_repo.create(
-                project_id=active_project.id,
-                original_name=u_file.name,
-                display_name=u_file.name,
-                storage_path=file_path,
-                file_type=u_file.type or safe_name.rsplit(".", 1)[-1],
-                size=u_file.size,
-            )
-            indexed.append(safe_name)
-            st.write(f"✅ {safe_name}: {n_chunks} chunks indexed")
 
         status.update(label="Processing finished", state="complete", expanded=False)
 
     if indexed:
-        load_graph.clear()  # rebuild retriever so it sees the new chunks
+        graph_cache_manager.invalidate(active_project.id)
         st.toast(f"Indexed {len(indexed)} file(s).", icon="✅")
+    
     if skipped:
-        st.toast(f"Skipped duplicates: {', '.join(skipped)}", icon="⚠️")
+        st.toast(f"Skipped {len(skipped)} duplicate(s).", icon="⚠️")
+    
     if failed or empty:
-        # Keep the uploader as is, so the user can see what failed and retry
-        st.error(
-            "Some files could not be indexed: "
-            + ", ".join(failed + empty)
-        )
+        error_msg = ", ".join([f"{n} ({e})" for n, e in failed] + empty)
+        st.error(f"Failed: {error_msg}")
         if indexed:
             st.button("Continue", on_click=lambda: None)
         return
 
-    st.session_state[version_key] += 1  # clears the uploader
-    rerun()
+    st.session_state[version_key] += 1  # Clear uploader
+    st.rerun()
 
 
-# ==============================================================================
+# =====================================================
 # MAIN
-# ==============================================================================
+# =====================================================
 def main():
-    init_db()
-    apply_custom_css()
-
-    st.session_state.setdefault("active_project_id", None)
-    st.session_state.setdefault("active_chat_id", None)
-
-    db = SessionLocal()
+    """Main application"""
     try:
-        render_sidebar(db)
+        init_db()
+        apply_custom_css()
+
+        st.session_state.setdefault("active_project_id", None)
+        st.session_state.setdefault("active_chat_id", None)
+
+        render_sidebar(SessionLocal())
 
         if not st.session_state.active_project_id:
-            st.warning("Please create or select a project from the sidebar to begin.")
+            st.warning("Create or select a project from the sidebar.")
             st.stop()
 
-        project_repo = ProjectRepository(db)
-        chat_repo = ChatRepository(db)
-        file_repo = FileRepository(db)
+        with get_db_session() as db:
+            project_repo = ProjectRepository(db)
+            chat_repo = ChatRepository(db)
+            file_repo = FileRepository(db)
 
-        active_project = project_repo.get_by_id(st.session_state.active_project_id)
-        if active_project is None:
-            st.session_state.active_project_id = None
-            st.rerun()
+            try:
+                active_project = project_repo.get_by_id(st.session_state.active_project_id)
+            except Exception as e:
+                logger.error(f"Failed to load project: {e}")
+                st.error("Could not load project")
+                st.stop()
 
-        active_chat = (
-            chat_repo.get_by_id(st.session_state.active_chat_id)
-            if st.session_state.active_chat_id
-            else None
-        )
+            if not active_project:
+                st.session_state.active_project_id = None
+                st.rerun()
 
-        try:
-            graph_app = load_graph(active_project.id)
-        except Exception as e:
-            st.error(f"Could not build the RAG pipeline: {e}")
-            graph_app = None
+            try:
+                active_chat = (
+                    chat_repo.get_by_id(st.session_state.active_chat_id)
+                    if st.session_state.active_chat_id
+                    else None
+                )
+            except Exception as e:
+                logger.error(f"Failed to load chat: {e}")
+                active_chat = None
 
-        project_chats = chat_repo.get_by_project(active_project.id)
-        project_files = file_repo.get_by_project(active_project.id)
+            try:
+                cache_version = hash(st.session_state.active_project_id) % (2**31)
+                graph_app = load_graph(active_project.id, cache_version)
+            except Exception as e:
+                logger.error(f"Failed to build graph: {e}")
+                st.error(f"Could not build RAG pipeline: {e}")
+                graph_app = None
 
-        render_project_summary(
-            project_name=active_project.name,
-            description=active_project.description or "",
-            stats={
-                "chats": len(project_chats),
-                "documents": len(project_files),
-                "retrievals": max(len(project_chats), 1),
-                "avg_quality": "--",
-            },
-        )
+            try:
+                project_chats = chat_repo.get_by_project(active_project.id)
+                project_files = file_repo.get_by_project(active_project.id)
+            except Exception as e:
+                logger.error(f"Failed to load project data: {e}")
+                project_chats = []
+                project_files = []
 
-        tab_chat, tab_files = st.tabs(["💬 Chat Workspace", "📄 Document Management"])
+            render_project_summary(
+                project_name=active_project.name,
+                description=active_project.description or "",
+                stats={
+                    "chats": len(project_chats),
+                    "documents": len(project_files),
+                    "retrievals": "--",
+                    "avg_quality": "--",
+                },
+            )
 
-        with tab_chat:
-            render_chat_tab(db, graph_app, active_project, active_chat, len(project_files))
+            tab_chat, tab_files = st.tabs(["💬 Chat Workspace", "📄 Document Management"])
 
-        with tab_files:
-            render_files_tab(db, active_project)
-    finally:
-        db.close()
+            with tab_chat:
+                render_chat_tab(db, graph_app, active_project, active_chat, len(project_files))
+
+            with tab_files:
+                render_files_tab(db, active_project)
+
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}\n{traceback.format_exc()}")
+        st.error(f"Fatal application error: {e}")
+        st.stop()
 
 
-main()
+if __name__ == "__main__":
+    main()
